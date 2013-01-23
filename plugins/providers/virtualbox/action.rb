@@ -23,8 +23,8 @@ module VagrantPlugins
       autoload :DestroyUnusedNetworkInterfaces, File.expand_path("../action/destroy_unused_network_interfaces", __FILE__)
       autoload :DiscardState, File.expand_path("../action/discard_state", __FILE__)
       autoload :Export, File.expand_path("../action/export", __FILE__)
+      autoload :ForcedHalt, File.expand_path("../action/forced_halt", __FILE__)
       autoload :ForwardPorts, File.expand_path("../action/forward_ports", __FILE__)
-      autoload :Halt, File.expand_path("../action/halt", __FILE__)
       autoload :HostName, File.expand_path("../action/host_name", __FILE__)
       autoload :Import, File.expand_path("../action/import", __FILE__)
       autoload :IsRunning, File.expand_path("../action/is_running", __FILE__)
@@ -37,8 +37,6 @@ module VagrantPlugins
       autoload :NFS, File.expand_path("../action/nfs", __FILE__)
       autoload :Package, File.expand_path("../action/package", __FILE__)
       autoload :PackageVagrantfile, File.expand_path("../action/package_vagrantfile", __FILE__)
-      autoload :Provision, File.expand_path("../action/provision", __FILE__)
-      autoload :ProvisionerCleanup, File.expand_path("../action/provisioner_cleanup", __FILE__)
       autoload :PruneNFSExports, File.expand_path("../action/prune_nfs_exports", __FILE__)
       autoload :Resume, File.expand_path("../action/resume", __FILE__)
       autoload :SaneDefaults, File.expand_path("../action/sane_defaults", __FILE__)
@@ -58,14 +56,15 @@ module VagrantPlugins
           b.use CleanMachineFolder
           b.use ClearForwardedPorts
           b.use EnvSet, :port_collision_handler => :correct
-          b.use ForwardPorts
           b.use Provision
+          b.use CheckPortCollisions
           b.use PruneNFSExports
           b.use NFS
           b.use ClearSharedFolders
           b.use ShareFolders
           b.use ClearNetworkInterfaces
           b.use Network
+          b.use ForwardPorts
           b.use HostName
           b.use SaneDefaults
           b.use Customize
@@ -86,11 +85,10 @@ module VagrantPlugins
 
             b2.use Call, DestroyConfirm do |env2, b3|
               if env2[:result]
-                b3.use Vagrant::Action::General::Validate
+                b3.use ConfigValidate
                 b3.use CheckAccessible
-                b3.use EnvSet, :force => true
+                b3.use EnvSet, :force_halt => true
                 b3.use action_halt
-                b3.use ProvisionerCleanup
                 b3.use PruneNFSExports
                 b3.use Destroy
                 b3.use CleanMachineFolder
@@ -112,7 +110,11 @@ module VagrantPlugins
             if env[:result]
               b2.use CheckAccessible
               b2.use DiscardState
-              b2.use Halt
+              b2.use Call, GracefulHalt, :poweroff, :running do |env2, b3|
+                if !env2[:result]
+                  b3.use ForcedHalt
+                end
+              end
             else
               b2.use MessageNotCreated
             end
@@ -146,7 +148,7 @@ module VagrantPlugins
       def self.action_provision
         Vagrant::Action::Builder.new.tap do |b|
           b.use CheckVirtualbox
-          b.use Vagrant::Action::General::Validate
+          b.use ConfigValidate
           b.use Call, Created do |env1, b2|
             if !env1[:result]
               b2.use MessageNotCreated
@@ -178,7 +180,7 @@ module VagrantPlugins
               next
             end
 
-            b2.use Vagrant::Action::General::Validate
+            b2.use ConfigValidate
             b2.use action_halt
             b2.use action_start
           end
@@ -193,6 +195,7 @@ module VagrantPlugins
           b.use Call, Created do |env, b2|
             if env[:result]
               b2.use CheckAccessible
+              b2.use EnvSet, :port_collision_handler => :error
               b2.use CheckPortCollisions
               b2.use Resume
             else
@@ -229,7 +232,7 @@ module VagrantPlugins
       def self.action_start
         Vagrant::Action::Builder.new.tap do |b|
           b.use CheckVirtualbox
-          b.use Vagrant::Action::General::Validate
+          b.use ConfigValidate
           b.use Call, IsRunning do |env, b2|
             # If the VM is running, then our work here is done, exit
             next if env[:result]
@@ -269,7 +272,7 @@ module VagrantPlugins
       def self.action_up
         Vagrant::Action::Builder.new.tap do |b|
           b.use CheckVirtualbox
-          b.use Vagrant::Action::General::Validate
+          b.use ConfigValidate
           b.use Call, Created do |env, b2|
             # If the VM is NOT created yet, then do the setup steps
             if !env[:result]

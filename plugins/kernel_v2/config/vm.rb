@@ -1,6 +1,7 @@
 require "pathname"
 
 require "vagrant"
+require "vagrant/config/v2/util"
 
 require File.expand_path("../vm_provider", __FILE__)
 require File.expand_path("../vm_provisioner", __FILE__)
@@ -11,12 +12,14 @@ module VagrantPlugins
     class VMConfig < Vagrant.plugin("2", :config)
       DEFAULT_VM_NAME = :default
 
-      attr_accessor :auto_port_range
       attr_accessor :base_mac
       attr_accessor :box
       attr_accessor :box_url
+      attr_accessor :graceful_halt_retry_count
+      attr_accessor :graceful_halt_retry_interval
       attr_accessor :guest
       attr_accessor :host_name
+      attr_accessor :usable_port_range
       attr_reader :forwarded_ports
       attr_reader :shared_folders
       attr_reader :networks
@@ -24,10 +27,12 @@ module VagrantPlugins
       attr_reader :provisioners
 
       def initialize
-        @forwarded_ports = []
-        @shared_folders = {}
-        @networks = []
-        @provisioners = []
+        @forwarded_ports              = []
+        @graceful_halt_retry_count    = UNSET_VALUE
+        @graceful_halt_retry_interval = UNSET_VALUE
+        @shared_folders               = {}
+        @networks                     = []
+        @provisioners                 = []
 
         # The providers hash defaults any key to a provider object
         @providers = Hash.new do |hash, key|
@@ -45,17 +50,6 @@ module VagrantPlugins
         result
       end
 
-      def forward_port(guestport, hostport, options=nil)
-        @forwarded_ports << {
-          :name       => "#{guestport.to_s(32)}-#{hostport.to_s(32)}",
-          :guestport  => guestport,
-          :hostport   => hostport,
-          :protocol   => :tcp,
-          :adapter    => 1,
-          :auto       => false
-        }.merge(options || {})
-      end
-
       def share_folder(name, guestpath, hostpath, opts=nil)
         @shared_folders[name] = {
           :guestpath => guestpath.to_s,
@@ -69,6 +63,21 @@ module VagrantPlugins
         }.merge(opts || {})
       end
 
+      # Define a way to access the machine via a network. This exposes a
+      # high-level abstraction for networking that may not directly map
+      # 1-to-1 for every provider. For example, AWS has no equivalent to
+      # "port forwarding." But most providers will attempt to implement this
+      # in a way that behaves similarly.
+      #
+      # `type` can be one of:
+      #
+      #   * `:forwarded_port` - A port that is accessible via localhost
+      #     that forwards into the machine.
+      #   * `:private_network` - The machine gets an IP that is not directly
+      #     publicly accessible, but ideally accessible from this machine.
+      #   * `:public_network` - The machine gets an IP on a shared network.
+      #
+      # @param [Symbol] type Type of network
       def network(type, *args)
         @networks << [type, args]
       end
@@ -118,64 +127,50 @@ module VagrantPlugins
         define(DEFAULT_VM_NAME) if defined_vm_keys.empty?
       end
 
-      def validate(env, errors)
-        errors.add(I18n.t("vagrant.config.vm.box_missing")) if !box
-        errors.add(I18n.t("vagrant.config.vm.box_not_found", :name => box)) if box && !box_url && !env.boxes.find(box, :virtualbox)
-        errors.add(I18n.t("vagrant.config.vm.base_mac_invalid")) if env.boxes.find(box, :virtualbox) && !base_mac
+      def validate(machine)
+        errors = []
+        errors << I18n.t("vagrant.config.vm.box_missing") if !box
+        errors << I18n.t("vagrant.config.vm.box_not_found", :name => box) if \
+          box && !box_url && !machine.box
 
         shared_folders.each do |name, options|
-          hostpath = Pathname.new(options[:hostpath]).expand_path(env.root_path)
+          hostpath = Pathname.new(options[:hostpath]).expand_path(machine.env.root_path)
 
           if !hostpath.directory? && !options[:create]
-            errors.add(I18n.t("vagrant.config.vm.shared_folder_hostpath_missing",
+            errors << I18n.t("vagrant.config.vm.shared_folder_hostpath_missing",
                        :name => name,
-                       :path => options[:hostpath]))
+                       :path => options[:hostpath])
           end
 
           if options[:nfs] && (options[:owner] || options[:group])
             # Owner/group don't work with NFS
-            errors.add(I18n.t("vagrant.config.vm.shared_folder_nfs_owner_group",
-                              :name => name))
+            errors << I18n.t("vagrant.config.vm.shared_folder_nfs_owner_group",
+                              :name => name)
           end
         end
 
-        # Validate some basic networking
-        #
-        # TODO: One day we need to abstract this out, since in the future
-        # providers other than VirtualBox will not be able to satisfy
-        # all types of networks.
-        networks.each do |type, args|
-          if type == :hostonly && args[0] == :dhcp
-            # Valid. There is no real way this can be invalid at the moment.
-          elsif type == :hostonly
-            # Validate the host-only network
-            ip      = args[0]
+        # We're done with VM level errors so prepare the section
+        errors = { "vm" => errors }
 
-            if !ip
-              errors.add(I18n.t("vagrant.config.vm.network_ip_required"))
-            else
-              ip_parts = ip.split(".")
+        # Validate only the _active_ provider
+        if machine.provider_config
+          provider_errors = machine.provider_config.validate(machine)
+          if provider_errors
+            errors = Vagrant::Config::V2::Util.merge_errors(errors, provider_errors)
+          end
+        end
 
-              if ip_parts.length != 4
-                errors.add(I18n.t("vagrant.config.vm.network_ip_invalid",
-                                  :ip => ip))
-              elsif ip_parts.last == "1"
-                errors.add(I18n.t("vagrant.config.vm.network_ip_ends_one",
-                                  :ip => ip))
-              end
+        # Validate provisioners
+        @provisioners.each do |vm_provisioner|
+          if vm_provisioner.config
+            provisioner_errors = vm_provisioner.config.validate(machine)
+            if provisioner_errors
+              errors = Vagrant::Config::V2::Util.merge_errors(errors, provisioner_errors)
             end
-          elsif type == :bridged
-          else
-            # Invalid network type
-            errors.add(I18n.t("vagrant.config.vm.network_invalid",
-                              :type => type.to_s))
           end
         end
 
-        # Each provisioner can validate itself
-        provisioners.each do |prov|
-          prov.validate(env, errors)
-        end
+        errors
       end
     end
   end
