@@ -14,7 +14,7 @@ module VagrantPlugins
         Provider
       end
 
-      config(:virtualbox, :provider => :virtualbox) do
+      config(:virtualbox, :provider) do
         require File.expand_path("../config", __FILE__)
         Config
       end
@@ -29,6 +29,14 @@ module VagrantPlugins
       autoload :Version_4_0, File.expand_path("../driver/version_4_0", __FILE__)
       autoload :Version_4_1, File.expand_path("../driver/version_4_1", __FILE__)
       autoload :Version_4_2, File.expand_path("../driver/version_4_2", __FILE__)
+    end
+
+    module Model
+      autoload :ForwardedPort, File.expand_path("../model/forwarded_port", __FILE__)
+    end
+
+    module Util
+      autoload :CompileForwardedPorts, File.expand_path("../util/compile_forwarded_ports", __FILE__)
     end
   end
 end

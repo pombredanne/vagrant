@@ -88,6 +88,10 @@ module Vagrant
       end
     end
 
+    class ActiveMachineWithDifferentProvider < VagrantError
+      error_key(:active_machine_with_different_provider)
+    end
+
     class BaseVMNotFound < VagrantError
       status_code(18)
       error_key(:base_vm_not_found)
@@ -146,14 +150,12 @@ module Vagrant
       error_key(:cli_invalid_options)
     end
 
-    class ConfigValidationFailed < VagrantError
-      status_code(42)
-      error_key(:config_validation)
+    class ConfigInvalid < VagrantError
+      error_key(:config_invalid)
     end
 
-    class DeprecationError < VagrantError
-      status_code(60)
-      error_key(:deprecation)
+    class ConfigUpgradeErrors < VagrantError
+      error_key(:config_upgrade_errors)
     end
 
     class DestroyRequiresForce < VagrantError
@@ -244,6 +246,10 @@ module Vagrant
 
     class MachineNotFound < VagrantError
       error_key(:machine_not_found)
+    end
+
+    class MachineStateInvalid < VagrantError
+      error_key(:machine_state_invalid)
     end
 
     class MultiVMEnvironmentRequired < VagrantError
@@ -370,6 +376,10 @@ module Vagrant
       error_key(:ssh_disconnected)
     end
 
+    class SSHHostDown < VagrantError
+      error_key(:ssh_host_down)
+    end
+
     class SSHKeyBadPermissions < VagrantError
       status_code(12)
       error_key(:ssh_key_bad_permissions)
@@ -431,6 +441,10 @@ module Vagrant
     class VirtualBoxInvalidVersion < VagrantError
       status_code(17)
       error_key(:virtualbox_invalid_version)
+    end
+
+    class VirtualBoxNoRoomForHighLevelNetwork < VagrantError
+      error_key(:virtualbox_no_room_for_high_level_network)
     end
 
     class VirtualBoxNotDetected < VagrantError

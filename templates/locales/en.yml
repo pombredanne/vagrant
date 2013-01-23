@@ -1,6 +1,15 @@
 en:
   vagrant:
     general:
+      config_upgrade_messages: |-
+        There were warnings and/or errors while loading your Vagrantfile.
+        Your Vagrantfile was written for an earlier version of Vagrant,
+        and while Vagrant does the best it can to remain backwards
+        compatible, there are some cases where things have changed
+        significantly enough to warrant a message. These messages are
+        shown below.
+
+        %{output}
       moving_home_dir: "Moving old Vagrant home directory to new location: %{directory}"
       home_dir_migration_failed: |-
         Both an old and new Vagrant home directory exist. Only the new one will
@@ -25,6 +34,16 @@ en:
 # Translations for exception classes
 #-------------------------------------------------------------------------------
     errors:
+      active_machine_with_different_provider: |-
+        An active machine was found with a different provider. Vagrant
+        currently allows each machine to be brought up with only a single
+        provider at a time. A future version will remove this limitation.
+        Until then, please destroy the existing machine to up with a new
+        provider.
+
+        Machine name: %{name}
+        Active provider: %{active_provider}
+        Requested provider: %{requested_provider}
       base_vm_not_found: The base VM with the name '%{name}' was not found.
       box_not_found: Box '%{name}' could not be found.
       box_provider_doesnt_match: |-
@@ -46,16 +65,14 @@ en:
         available below.
 
         %{help}
-      config_validation: |-
-        There was a problem with the configuration of Vagrant. The error message(s)
-        are printed below:
+      config_invalid: |-
+        There are errors in the configuration of this machine. Please fix
+        the following errors and try again:
 
-        %{messages}
-      deprecation: |-
-        You are using a feature that has been removed in this version. Explanation:
-
-        %{message}
-        Note that this error message will not appear in the next version of Vagrant.
+        %{errors}
+      config_upgrade_errors: |-
+        Because there were errors upgrading your Vagrantfiles, Vagrant
+        can no longer continue. Please fix the errors above and try again.
       destroy_requires_force: |-
         Destroy doesn't have a TTY to ask for confirmation. Please pass the
         `--force` flag to force a destroy, otherwise attach a TTY so that
@@ -128,6 +145,12 @@ en:
       machine_not_found: |-
         The machine with the name '%{name}' was not found configured for
         this Vagrant environment.
+      machine_state_invalid: |-
+        An internal error has occurred! The provider of the machine you're
+        trying to work with reported an invalid state. This is a bug with
+        the provider you're using, and not with Vagrant itself or with
+        any configuration you may have done. Please report this bug to
+        the proper location.
       multi_vm_required: |-
         A multi-vm environment is required for name specification to this command.
       multi_vm_target_required: |-
@@ -191,6 +214,10 @@ en:
         usually indicates that SSH within the guest machine was unable to
         properly start up. Please boot the VM in GUI mode to check whether
         it is booting properly.
+      ssh_host_down: |-
+        While attempting to connect with SSH, a "host is down" (EHOSTDOWN)
+        error was received. Please verify your SSH settings are correct
+        and try again.
       ssh_key_bad_permissions: |-
         The private key to connect to this box via SSH has invalid permissions
         set on it. The permissions of the private key should be set to 0600, otherwise SSH will
@@ -270,6 +297,13 @@ en:
         VirtualBox is complaining that the installation is incomplete. Please
         run `VBoxManage --version` to see the error message which should contain
         instructions on how to fix this error.
+      virtualbox_no_room_for_high_level_network: |-
+        There is no available slots on the VirtualBox VM for the configured
+        high-level network interfaces. "private_network" and "public_network"
+        network configurations consume a single network adapter slot on the
+        VirtualBox VM. VirtualBox limits the number of slots to 8, and it
+        appears that every slot is in use. Please lower the number of used
+        network adapters.
       virtualbox_not_detected: |-
         Vagrant could not detect VirtualBox! Make sure VirtualBox is properly installed.
         Vagrant uses the `VBoxManage` binary that ships with VirtualBox, and requires
@@ -295,13 +329,11 @@ en:
 #-------------------------------------------------------------------------------
     config:
       common:
-        error_empty: "`%{field}` must be filled in."
+        error_empty: "`%{field}` must be not be empty."
       chef:
         cookbooks_path_empty: "Must specify a cookbooks path for chef solo."
         run_list_empty: "Run list must not be empty."
         server_url_empty: "Chef server URL must be populated."
-        vagrant_as_json_key: |-
-          `vagrant` cannot be a JSON key, because it is used by Vagrant already.
         validation_key_path: "Validation key path must be valid path to your chef server validation key."
       ssh:
         private_key_missing: "`private_key_path` file must exist: %{path}"

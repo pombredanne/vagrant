@@ -26,6 +26,13 @@ module Vagrant
     # The `cwd` that this environment represents
     attr_reader :cwd
 
+    # The persistent data directory where global data can be stored. It
+    # is up to the creator of the data in this directory to properly
+    # remove it when it is no longer needed.
+    #
+    # @return [Pathname]
+    attr_reader :data_dir
+
     # The valid name for a Vagrantfile for this environment.
     attr_reader :vagrantfile_name
 
@@ -101,9 +108,10 @@ module Vagrant
 
       # Setup the home directory
       setup_home_path
-      @tmp_path   = @home_path.join("tmp")
       @boxes_path = @home_path.join("boxes")
+      @data_dir   = @home_path.join("data")
       @gems_path  = @home_path.join("gems")
+      @tmp_path   = @home_path.join("tmp")
 
       # Setup the local data directory. If a configuration path is given,
       # then it is expanded relative to the working directory. Otherwise,
@@ -168,7 +176,7 @@ module Vagrant
         # If this isn't a directory then it isn't a machine
         next if !name_folder.directory?
 
-        name = name_folder.basename.to_s
+        name = name_folder.basename.to_s.to_sym
         name_folder.children(true).each do |provider_folder|
           # If this isn't a directory then it isn't a provider
           next if !provider_folder.directory?
@@ -239,7 +247,8 @@ module Vagrant
       # with the box Vagrantfile (if it has one).
       vm_config_key = "vm_#{name}".to_sym
       @config_loader.set(vm_config_key, sub_vm.config_procs)
-      config = @config_loader.load([:default, :home, :root, vm_config_key])
+      config, config_warnings, config_errors = \
+        @config_loader.load([:default, :home, :root, vm_config_key])
 
       box = nil
       begin
@@ -262,7 +271,8 @@ module Vagrant
           @logger.info("Box exists with Vagrantfile. Reloading machine config.")
           box_config_key = "box_#{box.name}_#{box.provider}".to_sym
           @config_loader.set(box_config_key, box_vagrantfile)
-          config = @config_loader.load([:default, box_config_key, :home, :root, vm_config_key])
+          config, config_warnings, config_errors = \
+            @config_loader.load([:default, box_config_key, :home, :root, vm_config_key])
         end
       end
 
@@ -273,6 +283,22 @@ module Vagrant
       # XXX: Permissions error here.
       machine_data_path = @local_data_path.join("machines/#{name}/#{provider}")
       FileUtils.mkdir_p(machine_data_path)
+
+      # If there were warnings or errors we want to output them
+      if !config_warnings.empty? || !config_errors.empty?
+        # The color of the output depends on whether we have warnings
+        # or errors...
+        level  = config_errors.empty? ? :warn : :error
+        output = Util::TemplateRenderer.render(
+          "config/messages",
+          :warnings => config_warnings,
+          :errors => config_errors).chomp
+        @ui.send(level, I18n.t("vagrant.general.config_upgrade_messages",
+                              :output => output))
+
+        # If we had errors, then we bail
+        raise Errors::ConfigUpgradeErrors if !config_errors.empty?
+      end
 
       # Create the machine and cache it for future calls. This will also
       # return the machine from this method.
@@ -289,21 +315,22 @@ module Vagrant
       config_global.vm.defined_vm_keys.dup
     end
 
-    # Returns the primary VM associated with this environment. This
-    # method is only applicable for multi-VM environments. This can
-    # potentially be nil if no primary VM is specified.
+    # This returns the name of the machine that is the "primary." In the
+    # case of  a single-machine environment, this is just the single machine
+    # name. In the case of a multi-machine environment, then this can
+    # potentially be nil if no primary machine is specified.
     #
-    # @param [Symbol] provider The provider to back the primary machine.
-    # @return [VM]
-    def primary_machine(provider)
-      if machine_names.length == 1
-        return machine(machine_names[0], provider)
-      end
+    # @return [Symbol]
+    def primary_machine_name
+      # If it is a single machine environment, then return the name
+      return machine_names.first if machine_names.length == 1
 
+      # If it is a multi-machine environment, then return the primary
       config_global.vm.defined_vms.each do |name, subvm|
-        return machine(name, provider) if subvm.options[:primary]
+        return name if subvm.options[:primary]
       end
 
+      # If no primary was specified, nil it is
       nil
     end
 
@@ -328,7 +355,7 @@ module Vagrant
       # will return nil, and we don't want to trigger a detect load.
       host_klass = config_global.vagrant.host
       if host_klass.nil? || host_klass == :detect
-        hosts = Vagrant.plugin("2").manager.hosts
+        hosts = Vagrant.plugin("2").manager.hosts.to_hash
 
         # Get the flattened list of available hosts
         host_klass = Hosts.detect(hosts)
@@ -439,7 +466,8 @@ module Vagrant
 
       # Make the initial call to get the "global" config. This is mostly
       # only useful to get the list of machines that we are managing.
-      @config_global = @config_loader.load([:default, :home, :root])
+      # Because of this, we ignore any warnings or errors.
+      @config_global, _ = @config_loader.load([:default, :home, :root])
 
       # Old order: default, box, home, root, vm
     end
@@ -456,7 +484,7 @@ module Vagrant
       # Setup the list of child directories that need to be created if they
       # don't already exist.
       dirs    = [@home_path]
-      subdirs = ["tmp", "boxes", "gems"]
+      subdirs = ["boxes", "data", "gems", "tmp"]
       dirs    += subdirs.collect { |subdir| @home_path.join(subdir) }
 
       # Go through each required directory, creating it if it doesn't exist
