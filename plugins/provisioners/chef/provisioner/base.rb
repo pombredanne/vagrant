@@ -42,20 +42,36 @@ module VagrantPlugins
         def chown_provisioning_folder
           @machine.communicate.tap do |comm|
             comm.sudo("mkdir -p #{@config.provisioning_path}")
-            comm.sudo("chown #{@machine.config.ssh.username} #{@config.provisioning_path}")
+            comm.sudo("chown #{@machine.ssh_info[:username]} #{@config.provisioning_path}")
           end
         end
 
         def setup_config(template, filename, template_vars)
+          # If we have custom configuration, upload it
+          remote_custom_config_path = nil
+          if @config.custom_config_path
+            expanded = File.expand_path(
+              @config.custom_config_path, @machine.env.root_path)
+            remote_custom_config_path = File.join(
+              config.provisioning_path, "custom-config.rb")
+
+            @machine.communicate.upload(expanded, remote_custom_config_path)
+          end
+
           config_file = Vagrant::Util::TemplateRenderer.render(template, {
+            :custom_configuration => remote_custom_config_path,
+            :file_cache_path => @config.file_cache_path,
+            :file_backup_path => @config.file_backup_path,
             :log_level        => @config.log_level.to_sym,
+            :verbose_logging  => @config.verbose_logging,
             :http_proxy       => @config.http_proxy,
             :http_proxy_user  => @config.http_proxy_user,
             :http_proxy_pass  => @config.http_proxy_pass,
             :https_proxy      => @config.https_proxy,
             :https_proxy_user => @config.https_proxy_user,
             :https_proxy_pass => @config.https_proxy_pass,
-            :no_proxy         => @config.no_proxy
+            :no_proxy         => @config.no_proxy,
+            :formatter        => @config.formatter
           }.merge(template_vars))
 
           # Create a temporary file to store the data so we
@@ -75,7 +91,9 @@ module VagrantPlugins
           @machine.env.ui.info I18n.t("vagrant.provisioners.chef.json")
 
           # Get the JSON that we're going to expose to Chef
-          json = JSON.pretty_generate(@config.merged_json)
+          json = @config.json
+          json[:run_list] = @config.run_list if !@config.run_list.empty?
+          json = JSON.pretty_generate(json)
 
           # Create a temporary file to store the data so we
           # can upload it
@@ -83,7 +101,11 @@ module VagrantPlugins
           temp.write(json)
           temp.close
 
-          @machine.communicate.upload(temp.path, File.join(@config.provisioning_path, "dna.json"))
+          remote_file = File.join(@config.provisioning_path, "dna.json")
+          @machine.communicate.tap do |comm|
+            comm.sudo("rm #{remote_file}", :error_check => false)
+            comm.upload(temp.path, remote_file)
+          end
         end
       end
     end

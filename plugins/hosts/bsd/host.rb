@@ -34,11 +34,81 @@ module VagrantPlugins
         end
       end
 
-      def nfs_export(id, ip, folders)
+      def nfs_export(id, ips, folders)
+        # We need to build up mapping of directories that are enclosed
+        # within each other because the exports file has to have subdirectories
+        # of an exported directory on the same line. e.g.:
+        #
+        #   "/foo" "/foo/bar" ...
+        #   "/bar"
+        #
+        # We build up this mapping within the following hash.
+        @logger.debug("Compiling map of sub-directories for NFS exports...")
+        dirmap = {}
+        folders.each do |_, opts|
+          hostpath = opts[:hostpath].dup
+          hostpath.gsub!('"', '\"')
+
+          found = false
+          dirmap.each do |dirs, diropts|
+            dirs.each do |dir|
+              if dir.start_with?(hostpath) || hostpath.start_with?(dir)
+                # TODO: verify opts and diropts are _identical_, raise an error
+                # if not. NFS mandates subdirectories have identical options.
+                dirs << hostpath
+                found = true
+                break
+              end
+            end
+
+            break if found
+          end
+
+          if !found
+            dirmap[[hostpath]] = opts.dup
+          end
+        end
+
+        # Sort all the keys by length so that the directory closest to
+        # the root is exported first.
+        dirmap.each do |dirs, _|
+          dirs.sort_by! { |d| d.length }
+        end
+
+        # Setup the NFS options
+        dirmap.each do |dirs, opts|
+          if !opts[:bsd__nfs_options]
+            opts[:bsd__nfs_options] = ["alldirs"]
+          end
+
+          hasmapall = false
+          opts[:bsd__nfs_options].each do |opt|
+            if opt =~ /^mapall=/
+              hasmapall = true
+              break
+            end
+          end
+
+          if !hasmapall
+            opts[:bsd__nfs_options] << "mapall=#{opts[:map_uid]}:#{opts[:map_gid]}"
+          end
+
+          opts[:bsd__compiled_nfs_options] = opts[:bsd__nfs_options].map do |opt|
+            "-#{opt}"
+          end.join(" ")
+        end
+
+        @logger.info("Exporting the following for NFS...")
+        dirmap.each do |dirs, opts|
+          @logger.info("NFS DIR: #{dirs.inspect}")
+          @logger.info("NFS OPTS: #{opts.inspect}")
+        end
+
         output = TemplateRenderer.render(@nfs_exports_template,
                                          :uuid => id,
-                                         :ip => ip,
-                                         :folders => folders)
+                                         :ips => ips,
+                                         :folders => dirmap,
+                                         :user => Process.uid)
 
         # The sleep ensures that the output is truly flushed before any `sudo`
         # commands are issued.
@@ -50,8 +120,9 @@ module VagrantPlugins
 
         # Output the rendered template into the exports
         output.split("\n").each do |line|
-          line = line.gsub('"', '\"')
-          system(%Q[sudo su root -c "echo '#{line}' >> /etc/exports"])
+          line.gsub!('"', '\"')
+          line.gsub!("'", "'\\\\''")
+          system(%Q[sudo -s -- "echo '#{line}' >> /etc/exports"])
         end
 
         # We run restart here instead of "update" just in case nfsd
@@ -65,9 +136,10 @@ module VagrantPlugins
         @logger.info("Pruning invalid NFS entries...")
 
         output = false
+        user = Process.uid
 
         File.read("/etc/exports").lines.each do |line|
-          if id = line[/^# VAGRANT-BEGIN: (.+?)$/, 1]
+          if id = line[/^# VAGRANT-BEGIN:( #{user})? ([A-Za-z0-9-]+?)$/, 2]
             if valid_ids.include?(id)
               @logger.debug("Valid ID: #{id}")
             else
@@ -82,6 +154,8 @@ module VagrantPlugins
             end
           end
         end
+      rescue Errno::EACCES
+        raise Vagrant::Errors::NFSCantReadExports
       end
 
       protected
@@ -89,9 +163,15 @@ module VagrantPlugins
       def nfs_cleanup(id)
         return if !File.exist?("/etc/exports")
 
+        # Escape sed-sensitive characters:
+        id = id.gsub("/", "\\/")
+        id = id.gsub(".", "\\.")
+
+        user = Process.uid
+
         # Use sed to just strip out the block of code which was inserted
         # by Vagrant, and restart NFS.
-        system("sudo sed -e '/^# VAGRANT-BEGIN: #{id}/,/^# VAGRANT-END: #{id}/ d' -ibak /etc/exports")
+        system("sudo sed -E -e '/^# VAGRANT-BEGIN:( #{user})? #{id}/,/^# VAGRANT-END:( #{user})? #{id}/ d' -ibak /etc/exports")
       end
     end
   end

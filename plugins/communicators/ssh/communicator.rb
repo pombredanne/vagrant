@@ -1,7 +1,11 @@
+require 'logger'
+require 'pathname'
+require 'stringio'
 require 'timeout'
 
 require 'log4r'
 require 'net/ssh'
+require 'net/ssh/proxy/command'
 require 'net/scp'
 
 require 'vagrant/util/ansi_escape_code_remover'
@@ -54,8 +58,18 @@ module VagrantPlugins
         }.merge(opts || {})
 
         # Connect via SSH and execute the command in the shell.
+        stdout = ""
+        stderr = ""
         exit_status = connect do |connection|
-          shell_execute(connection, command, opts[:sudo], &block)
+          shell_execute(connection, command, opts[:sudo]) do |type, data|
+            if type == :stdout
+              stdout += data
+            elsif type == :stderr
+              stderr += data
+            end
+
+            block.call(type, data) if block
+          end
         end
 
         # Check for any errors
@@ -63,7 +77,11 @@ module VagrantPlugins
           # The error classes expect the translation key to be _key,
           # but that makes for an ugly configuration parameter, so we
           # set it here from `error_key`
-          error_opts = opts.merge(:_key => opts[:error_key])
+          error_opts = opts.merge(
+            :_key => opts[:error_key],
+            :stdout => stdout,
+            :stderr => stderr
+          )
           raise opts[:error_class], error_opts
         end
 
@@ -94,8 +112,13 @@ module VagrantPlugins
         @logger.debug("Uploading: #{from} to #{to}")
 
         scp_connect do |scp|
-          # Open file read only to fix issue [GH-1036]
-          scp.upload!(File.open(from, "r"), to)
+          if File.directory?(from)
+            # Recurisvely upload directories
+            scp.upload!(from, to, :recursive => true)
+          else
+            # Open file read only to fix issue [GH-1036]
+            scp.upload!(File.open(from, "r"), to)
+          end
         end
       rescue RuntimeError => e
         # Net::SCP raises a runtime error for this so the only way we have
@@ -118,8 +141,9 @@ module VagrantPlugins
           # socket.
           begin
             @connection.exec!("")
-          rescue IOError
-            @logger.info("Connection has been closed. Not re-using.")
+          rescue Exception => e
+            @logger.info("Connection errored, not re-using. Will reconnect.")
+            @logger.debug(e.inspect)
             @connection = nil
           end
 
@@ -132,22 +156,25 @@ module VagrantPlugins
           end
         end
 
-        # XXX: We need to raise some exception if SSH is not ready
+        # Get the SSH info for the machine, raise an exception if the
+        # provider is saying that SSH is not ready.
         ssh_info = @machine.ssh_info
+        raise Vagrant::Errors::SSHNotReady if ssh_info.nil?
 
         # Build the options we'll use to initiate the connection via Net::SSH
         opts = {
-          :port                  => ssh_info[:port],
+          :auth_methods          => ["none", "publickey", "hostbased", "password"],
+          :config                => false,
+          :forward_agent         => ssh_info[:forward_agent],
           :keys                  => [ssh_info[:private_key_path]],
           :keys_only             => true,
-          :user_known_hosts_file => [],
           :paranoid              => false,
-          :config                => false,
-          :forward_agent         => ssh_info[:forward_agent]
+          :port                  => ssh_info[:port],
+          :user_known_hosts_file => []
         }
 
         # Check that the private key permissions are valid
-        Vagrant::Util::SSH.check_key_permissions(ssh_info[:private_key_path])
+        Vagrant::Util::SSH.check_key_permissions(Pathname.new(ssh_info[:private_key_path]))
 
         # Connect to SSH, giving it a few tries
         connection = nil
@@ -156,18 +183,56 @@ module VagrantPlugins
           # errors that are generally fixed from a retry and don't
           # necessarily represent immediate failure cases.
           exceptions = [
+            Errno::EACCES,
+            Errno::EADDRINUSE,
             Errno::ECONNREFUSED,
+            Errno::ECONNRESET,
+            Errno::ENETUNREACH,
             Errno::EHOSTUNREACH,
             Net::SSH::Disconnect,
             Timeout::Error
           ]
 
-          connection = retryable(:tries => @machine.config.ssh.max_tries, :on => exceptions) do
-            Timeout.timeout(@machine.config.ssh.timeout) do
-              @logger.info("Attempting to connect to SSH: #{ssh_info[:host]}:#{ssh_info[:port]}")
-              Net::SSH.start(ssh_info[:host], ssh_info[:username], opts)
+          retries = 5
+          timeout = 60
+
+          @logger.info("Attempting SSH connnection...")
+          connection = retryable(:tries => retries, :on => exceptions) do
+            Timeout.timeout(timeout) do
+              begin
+                # This logger will get the Net-SSH log data for us.
+                ssh_logger_io = StringIO.new
+                ssh_logger    = Logger.new(ssh_logger_io)
+
+                # Setup logging for connections
+                connect_opts = opts.merge({
+                  :logger  => ssh_logger,
+                  :timeout => 15,
+                  :verbose => :debug
+                })
+
+                if ssh_info[:proxy_command]
+                  connect_opts[:proxy] = Net::SSH::Proxy::Command.new(ssh_info[:proxy_command])
+                end
+
+                @logger.info("Attempting to connect to SSH...")
+                @logger.info("  - Host: #{ssh_info[:host]}")
+                @logger.info("  - Port: #{ssh_info[:port]}")
+                @logger.info("  - Username: #{ssh_info[:username]}")
+                @logger.info("  - Key Path: #{ssh_info[:private_key_path]}")
+
+                Net::SSH.start(ssh_info[:host], ssh_info[:username], connect_opts)
+              ensure
+                # Make sure we output the connection log
+                @logger.debug("== Net-SSH connection debug-level log START ==")
+                @logger.debug(ssh_logger_io.string)
+                @logger.debug("== Net-SSH connection debug-level log END ==")
+              end
             end
           end
+        rescue Errno::EACCES
+          # This happens on connect() for unknown reasons yet...
+          raise Vagrant::Errors::SSHConnectEACCES
         rescue Errno::ETIMEDOUT, Timeout::Error
           # This happens if we continued to timeout when attempting to connect.
           raise Vagrant::Errors::SSHConnectionTimeout
@@ -184,9 +249,16 @@ module VagrantPlugins
         rescue Errno::ECONNREFUSED
           # This is raised if we failed to connect the max amount of times
           raise Vagrant::Errors::SSHConnectionRefused
+        rescue Errno::ECONNRESET
+          # This is raised if we failed to connect the max number of times
+          # due to an ECONNRESET.
+          raise Vagrant::Errors::SSHConnectionReset
         rescue Errno::EHOSTDOWN
           # This is raised if we get an ICMP DestinationUnknown error.
           raise Vagrant::Errors::SSHHostDown
+        rescue Errno::EHOSTUNREACH
+          # This is raised if we can't work out how to route traffic.
+          raise Vagrant::Errors::SSHNoRoute
         rescue NotImplementedError
           # This is raised if a private key type that Net-SSH doesn't support
           # is used. Show a nicer error.
@@ -194,11 +266,6 @@ module VagrantPlugins
         end
 
         @connection = connection
-
-        # This is hacky but actually helps with some issues where
-        # Net::SSH is simply not robust enough to handle... see
-        # issue #391, #455, etc.
-        sleep 4
 
         # Yield the connection that is ready to be used and
         # return the value of the block
@@ -220,30 +287,55 @@ module VagrantPlugins
           ch.exec(shell) do |ch2, _|
             # Setup the channel callbacks so we can get data and exit status
             ch2.on_data do |ch3, data|
-              if block_given?
-                # Filter out the clear screen command
-                data = remove_ansi_escape_codes(data)
-                @logger.debug("stdout: #{data}")
-                yield :stdout, data
-              end
+              # Filter out the clear screen command
+              data = remove_ansi_escape_codes(data)
+              @logger.debug("stdout: #{data}")
+              yield :stdout, data if block_given?
             end
 
             ch2.on_extended_data do |ch3, type, data|
-              if block_given?
-                # Filter out the clear screen command
-                data = remove_ansi_escape_codes(data)
-                @logger.debug("stderr: #{data}")
-                yield :stderr, data
-              end
+              # Filter out the clear screen command
+              data = remove_ansi_escape_codes(data)
+              @logger.debug("stderr: #{data}")
+              yield :stderr, data if block_given?
             end
 
             ch2.on_request("exit-status") do |ch3, data|
               exit_status = data.read_long
               @logger.debug("Exit status: #{exit_status}")
+
+              # Close the channel, since after the exit status we're
+              # probably done. This fixes up issues with hanging.
+              channel.close
             end
 
             # Set the terminal
             ch2.send_data "export TERM=vt100\n"
+
+            # Set SSH_AUTH_SOCK if we are in sudo and forwarding agent.
+            # This is to work around often misconfigured boxes where
+            # the SSH_AUTH_SOCK env var is not preserved.
+            if @machine.ssh_info[:forward_agent] && sudo
+              auth_socket = ""
+              execute("echo; printf $SSH_AUTH_SOCK") do |type, data|
+                if type == :stdout
+                  auth_socket += data
+                end
+              end
+
+              if auth_socket != ""
+                # Make sure we only read the last line which should be
+                # the $SSH_AUTH_SOCK env var we printed.
+                auth_socket = auth_socket.split("\n").last.chomp
+              end
+
+              if auth_socket == ""
+                @logger.warn("No SSH_AUTH_SOCK found despite forward_agent being set.")
+              else
+                @logger.info("Setting SSH_AUTH_SOCK remotely: #{auth_socket}")
+                ch2.send_data "export SSH_AUTH_SOCK=#{auth_socket}\n"
+              end
+            end
 
             # Output the command
             ch2.send_data "#{command}\n"
@@ -256,8 +348,33 @@ module VagrantPlugins
           end
         end
 
-        # Wait for the channel to complete
-        channel.wait
+        begin
+          keep_alive = nil
+
+          if @machine.config.ssh.keep_alive
+            # Begin sending keep-alive packets while we wait for the script
+            # to complete. This avoids connections closing on long-running
+            # scripts.
+            keep_alive = Thread.new do
+              loop do
+                sleep 5
+                @logger.debug("Sending SSH keep-alive...")
+                connection.send_global_request("keep-alive@openssh.com")
+              end
+            end
+          end
+
+          # Wait for the channel to complete
+          begin
+            channel.wait
+          rescue IOError
+            @logger.info("SSH connection unexpected closed. Assuming reboot or something.")
+            exit_status = 0
+          end
+        ensure
+          # Kill the keep-alive thread
+          keep_alive.kill if keep_alive
+        end
 
         # Return the final exit status
         return exit_status

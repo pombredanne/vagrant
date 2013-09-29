@@ -1,6 +1,7 @@
 require File.expand_path("../../base", __FILE__)
 
 require "pathname"
+require 'tempfile'
 
 describe Vagrant::BoxCollection do
   include_context "unit"
@@ -62,6 +63,19 @@ describe Vagrant::BoxCollection do
         to raise_error(Vagrant::Errors::BoxAlreadyExists)
     end
 
+    it "should replace the box if force is specified" do
+      prev_box_name = "foo"
+      prev_box_provider = :vmware
+
+      # Setup the environment with the box pre-added
+      environment.box2(prev_box_name, prev_box_provider)
+
+      # Attempt to add the box with the same name
+      box_path = environment.box2_file(prev_box_provider, metadata: { "replaced" => "yes" })
+      box = instance.add(box_path, prev_box_name, nil, true)
+      box.metadata["replaced"].should == "yes"
+    end
+
     it "should raise an exception if the box already exists and no provider is given" do
       # Create some box file
       box_name = "foo"
@@ -105,7 +119,19 @@ describe Vagrant::BoxCollection do
     end
 
     it "should raise an exception if you add an invalid box file" do
-      pending "I don't know how to generate an invalid tar."
+      # Tar Header information
+      CHECKSUM_OFFSET = 148
+      CHECKSUM_LENGTH = 8
+
+      Tempfile.new(['vagrant_testing', '.tar']) do |f|
+        # Corrupt the tar by writing over the checksum field
+        f.seek(CHECKSUM_OFFSET)
+        f.write("\0"*CHECKSUM_LENGTH)
+        f.close
+
+        expect { instance.add(path, "foo", :virtualbox) }.
+          to raise_error(Vagrant::Errors::BoxUnpackageFailure)
+      end
     end
   end
 

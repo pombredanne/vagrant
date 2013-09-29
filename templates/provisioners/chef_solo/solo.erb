@@ -1,10 +1,14 @@
 <% if node_name %>
 node_name "<%= node_name %>"
 <% end %>
-file_cache_path "<%= provisioning_path %>"
+file_cache_path    "<%= file_cache_path %>"
+file_backup_path   "<%= file_backup_path %>"
 cookbook_path <%= cookbooks_path.inspect %>
+<% if roles_path %>
 role_path <%= roles_path.inspect %>
+<% end %>
 log_level <%= log_level.inspect %>
+verbose_logging    <%= verbose_logging.inspect %>
 
 encrypted_data_bag_secret "<%= encrypted_data_bag_secret %>"
 
@@ -16,6 +20,14 @@ data_bag_path <%= data_bags_path.inspect %>
 recipe_url "<%= recipe_url %>"
 <% end -%>
 
+<% if environments_path %>
+environment_path <%= environments_path.inspect %>
+<% end -%>
+
+<% if environment %>
+environment "<%= environment %>"
+<% end -%>
+
 http_proxy <%= http_proxy.inspect %>
 http_proxy_user <%= http_proxy_user.inspect %>
 http_proxy_pass <%= http_proxy_pass.inspect %>
@@ -23,3 +35,11 @@ https_proxy <%= https_proxy.inspect %>
 https_proxy_user <%= https_proxy_user.inspect %>
 https_proxy_pass <%= https_proxy_pass.inspect %>
 no_proxy <%= no_proxy.inspect %>
+
+<% if formatter %>
+add_formatter "<%= formatter %>"
+<% end %>
+
+<% if custom_configuration -%>
+load "<%= custom_configuration %>"
+<% end -%>

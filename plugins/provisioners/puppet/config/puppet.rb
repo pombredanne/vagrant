@@ -2,18 +2,41 @@ module VagrantPlugins
   module Puppet
     module Config
       class Puppet < Vagrant.plugin("2", :config)
+        attr_accessor :facter
+        attr_accessor :hiera_config_path
         attr_accessor :manifest_file
         attr_accessor :manifests_path
         attr_accessor :module_path
-        attr_accessor :pp_path
         attr_accessor :options
-        attr_accessor :facter
+        attr_accessor :temp_dir
+        attr_accessor :working_directory
+        attr_accessor :nfs
 
-        def manifest_file; @manifest_file || "default.pp"; end
-        def manifests_path; @manifests_path || "manifests"; end
-        def pp_path; @pp_path || "/tmp/vagrant-puppet"; end
-        def options; @options ||= []; end
-        def facter; @facter ||= {}; end
+        def initialize
+          super
+
+          @hiera_config_path = UNSET_VALUE
+          @manifest_file     = UNSET_VALUE
+          @manifests_path    = UNSET_VALUE
+          @module_path       = UNSET_VALUE
+          @options           = []
+          @facter            = {}
+          @temp_dir          = UNSET_VALUE
+          @working_directory = UNSET_VALUE
+          @nfs               = UNSET_VALUE
+        end
+
+        def finalize!
+          super
+
+          @hiera_config_path = nil if @hiera_config_path == UNSET_VALUE
+          @manifest_file  = "default.pp" if @manifest_file == UNSET_VALUE
+          @manifests_path = "manifests" if @manifests_path == UNSET_VALUE
+          @module_path    = nil if @module_path == UNSET_VALUE
+          @temp_dir       = "/tmp/vagrant-puppet" if @temp_dir == UNSET_VALUE
+          @working_directory = nil if @working_directory == UNSET_VALUE
+          @nfs            = false if @nfs == UNSET_VALUE
+        end
 
         # Returns the manifests path expanded relative to the root path of the
         # environment.
@@ -36,7 +59,7 @@ module VagrantPlugins
         end
 
         def validate(machine)
-          errors = []
+          errors = _detected_errors
 
           # Calculate the manifests and module paths based on env
           this_expanded_manifests_path = expanded_manifests_path(machine.env.root_path)

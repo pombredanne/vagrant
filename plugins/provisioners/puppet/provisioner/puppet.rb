@@ -24,20 +24,20 @@ module VagrantPlugins
           # Setup the module paths
           @module_paths = []
           @expanded_module_paths.each_with_index do |path, i|
-            @module_paths << [path, File.join(config.pp_path, "modules-#{i}")]
+            @module_paths << [path, File.join(config.temp_dir, "modules-#{i}")]
           end
 
+          folder_opts = {}
+          folder_opts[:nfs] = true if @config.nfs
+          folder_opts[:owner] = "root" if !folder_opts[:nfs]
+
           # Share the manifests directory with the guest
-          root_config.vm.share_folder(
-            "manifests", manifests_guest_path, @expanded_manifests_path)
+          root_config.vm.synced_folder(
+            @expanded_manifests_path, manifests_guest_path, folder_opts)
 
           # Share the module paths
-          count = 0
           @module_paths.each do |from, to|
-            # Sorry for the cryptic key here, but VirtualBox has a strange limit on
-            # maximum size for it and its something small (around 10)
-            root_config.vm.share_folder("v-pp-m#{count}", to, from)
-            count += 1
+            root_config.vm.synced_folder(from, to, folder_opts)
           end
         end
 
@@ -48,15 +48,30 @@ module VagrantPlugins
             check << guest_path
           end
 
+          # Make sure the temporary directory is properly set up
+          @machine.communicate.tap do |comm|
+            comm.sudo("mkdir -p #{config.temp_dir}")
+            comm.sudo("chmod 0777 #{config.temp_dir}")
+          end
+
           verify_shared_folders(check)
 
           # Verify Puppet is installed and run it
           verify_binary("puppet")
+
+          # Upload Hiera configuration if we have it
+          @hiera_config_path = nil
+          if config.hiera_config_path
+            local_hiera_path   = File.expand_path(config.hiera_config_path, @machine.env.root_path)
+            @hiera_config_path = File.join(config.temp_dir, "hiera.yaml")
+            @machine.communicate.upload(local_hiera_path, @hiera_config_path)
+          end
+
           run_puppet_apply
         end
 
         def manifests_guest_path
-          File.join(config.pp_path, "manifests")
+          File.join(config.temp_dir, "manifests")
         end
 
         def verify_binary(binary)
@@ -70,7 +85,24 @@ module VagrantPlugins
         def run_puppet_apply
           options = [config.options].flatten
           module_paths = @module_paths.map { |_, to| to }
-          options << "--modulepath '#{module_paths.join(':')}'" if !@module_paths.empty?
+          if !@module_paths.empty?
+            # Prepend the default module path
+            module_paths.unshift("/etc/puppet/modules")
+
+            # Add the command line switch to add the module path
+            options << "--modulepath '#{module_paths.join(':')}'"
+          end
+
+          if @hiera_config_path
+            options << "--hiera_config=#{@hiera_config_path}"
+          end
+
+          if !@machine.env.ui.is_a?(Vagrant::UI::Colored)
+            options << "--color=false"
+          end
+
+          options << "--manifestdir #{manifests_guest_path}"
+          options << "--detailed-exitcodes"
           options << @manifest_file
           options = options.join(" ")
 
@@ -85,21 +117,25 @@ module VagrantPlugins
             facter = "#{facts.join(" ")} "
           end
 
-          command = "cd #{manifests_guest_path} && #{facter}puppet apply #{options} --detailed-exitcodes || [ $? -eq 2 ]"
+          command = "#{facter}puppet apply #{options} || [ $? -eq 2 ]"
+          if config.working_directory
+            command = "cd #{config.working_directory} && #{command}"
+          end
 
           @machine.env.ui.info I18n.t("vagrant.provisioners.puppet.running_puppet",
-                                      :manifest => @manifest_file)
+                                      :manifest => config.manifest_file)
 
           @machine.communicate.sudo(command) do |type, data|
-            data.chomp!
-            @machine.env.ui.info(data, :prefix => false) if !data.empty?
+            if !data.empty?
+              @machine.env.ui.info(data, :new_line => false, :prefix => false)
+            end
           end
         end
 
         def verify_shared_folders(folders)
           folders.each do |folder|
             @logger.debug("Checking for shared folder: #{folder}")
-            if !@machine.communicate.test("test -d #{folder}")
+            if !@machine.communicate.test("test -d #{folder}", sudo: true)
               raise PuppetError, :missing_shared_folders
             end
           end

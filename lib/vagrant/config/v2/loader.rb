@@ -77,8 +77,18 @@ module Vagrant
             end
           end
 
+          # Merge the missing keys
+          new_missing_key_calls =
+            old_state["missing_key_calls"] + new_state["missing_key_calls"]
+
           # Return the final root object
-          V2::Root.new(config_map, keys)
+          V2::Root.new(config_map).tap do |result|
+            result.__set_internal_state({
+              "config_map"        => config_map,
+              "keys"              => keys,
+              "missing_key_calls" => new_missing_key_calls
+            })
+          end
         end
 
         # Upgrade a V1 configuration to a V2 configuration. We do this by
@@ -107,6 +117,10 @@ module Vagrant
                 errors   += result[1]
               end
             end
+          end
+
+          old.__internal_state["missing_key_calls"].to_a.sort.each do |key|
+            warnings << I18n.t("vagrant.config.loader.bad_v1_key", :key => key)
           end
 
           [root, warnings, errors]

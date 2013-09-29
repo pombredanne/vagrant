@@ -65,18 +65,15 @@ module Vagrant
         # is run. This allows plugin authors to hook into things like VM
         # bootup, VM provisioning, etc.
         #
-        # @param [Symbol] name Name of the action.
+        # @param [String] name Name of the action.
+        # @param [Symbol] hook_name The location to hook. If this isn't
+        #   set, every middleware action is hooked.
         # @return [Array] List of the hooks for the given action.
-        def self.action_hook(name, &block)
-          # Get the list of hooks for the given hook name
-          data[:action_hooks] ||= {}
-          hooks = data[:action_hooks][name.to_sym] ||= []
+        def self.action_hook(name, hook_name=nil, &block)
+          # The name is currently not used but we want it for the future.
 
-          # Return the list if we don't have a block
-          return hooks if !block_given?
-
-          # Otherwise add the block to the list of hooks for this action.
-          hooks << block
+          hook_name ||= ALL_ACTIONS
+          components.action_hooks[hook_name] << block
         end
 
         # Defines additional command line commands available by key. The key
@@ -127,57 +124,36 @@ module Vagrant
         # without breaking anything in future versions of Vagrant.
         #
         # @param [String] name Configuration key.
-        # XXX: Document options hash
         def self.config(name, scope=nil, &block)
           scope ||= :top
           components.configs[scope].register(name.to_sym, &block)
           nil
         end
 
-        # Defines an "easy hook," which gives an easier interface to hook
-        # into action sequences.
-        def self.easy_hook(position, name, &block)
-          if ![:before, :after].include?(position)
-            raise InvalidEasyHookPosition, "must be :before, :after"
-          end
-
-          # This is the command sent to sequences to insert
-          insert_method = "insert_#{position}".to_sym
-
-          # Create the hook
-          hook = Easy.create_hook(&block)
-
-          # Define an action hook that listens to all actions and inserts
-          # the hook properly if the sequence contains what we're looking for
-          action_hook(ALL_ACTIONS) do |seq|
-            index = seq.index(name)
-            seq.send(insert_method, index, hook) if index
-          end
-        end
-
-        # Defines an "easy command," which is a command with limited
-        # functionality but far less boilerplate required over traditional
-        # commands. Easy commands let you make basic commands quickly and
-        # easily.
-        #
-        # @param [String] name Name of the command, how it will be invoked
-        #   on the command line.
-        def self.easy_command(name, &block)
-          command(name) { Easy.create_command(name, &block) }
-        end
-
         # Defines an additionally available guest implementation with
         # the given key.
         #
         # @param [String] name Name of the guest.
-        def self.guest(name=UNSET_VALUE, &block)
-          data[:guests] ||= Registry.new
+        # @param [String] parent Name of the parent guest (if any)
+        def self.guest(name=UNSET_VALUE, parent=nil, &block)
+          components.guests.register(name.to_sym) do
+            parent = parent.to_sym if parent
 
-          # Register a new guest class only if a name was given
-          data[:guests].register(name.to_sym, &block) if name != UNSET_VALUE
+            [block.call, parent]
+          end
+          nil
+        end
 
-          # Return the registry
-          data[:guests]
+        # Defines a capability for the given guest. The block should return
+        # a class/module that has a method with the capability name, ready
+        # to be executed. This means that if it is an instance method,
+        # the block should return an instance of the class.
+        #
+        # @param [String] guest The name of the guest
+        # @param [String] cap The name of the capability
+        def self.guest_capability(guest, cap, &block)
+          components.guest_capabilities[guest.to_sym].register(cap.to_sym, &block)
+          nil
         end
 
         # Defines an additionally available host implementation with
@@ -197,14 +173,12 @@ module Vagrant
         # Registers additional providers to be available.
         #
         # @param [Symbol] name Name of the provider.
-        def self.provider(name=UNSET_VALUE, &block)
-          data[:providers] ||= Registry.new
+        def self.provider(name=UNSET_VALUE, options=nil, &block)
+          components.providers.register(name.to_sym) do
+            [block.call, options || {}]
+          end
 
-          # Register a new provider class only if a name was given
-          data[:providers].register(name.to_sym, &block) if name != UNSET_VALUE
-
-          # Return the registry
-          data[:providers]
+          nil
         end
 
         # Registers additional provisioners to be available.

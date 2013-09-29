@@ -123,7 +123,6 @@ module Vagrant
                   loader = @versions.get(next_version)
                   upgrade_result = loader.upgrade(version_config)
 
-                  # XXX: Do something with the warning/error messages
                   this_warnings = upgrade_result[1]
                   this_errors   = upgrade_result[2]
                   @logger.debug("Upgraded to version #{next_version} with " +
@@ -194,13 +193,28 @@ module Vagrant
       def procs_for_path(path)
         @logger.debug("Load procs for pathname: #{path}")
 
-        begin
-          return Config.capture_configures do
+        return Config.capture_configures do
+          begin
             Kernel.load path
+          rescue SyntaxError => e
+            # Report syntax errors in a nice way.
+            raise Errors::VagrantfileSyntaxError, :file => e.message
+          rescue SystemExit
+            # Continue raising that exception...
+            raise
+          rescue Vagrant::Errors::VagrantError
+            # Continue raising known Vagrant errors since they already
+            # contain well worded error messages and context.
+            raise
+          rescue Exception => e
+            @logger.error("Vagrantfile load error: #{e.message}")
+            @logger.error(e.backtrace.join("\n"))
+
+            # Report the generic exception
+            raise Errors::VagrantfileLoadError,
+              :path => path,
+              :message => e.message
           end
-        rescue SyntaxError => e
-          # Report syntax errors in a nice way.
-          raise Errors::VagrantfileSyntaxError, :file => e.message
         end
       end
     end
