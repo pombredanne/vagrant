@@ -24,12 +24,24 @@ describe Vagrant::Plugin::V2::Plugin do
   end
 
   describe "action hooks" do
-    it "should register action hooks" do
+    it "should register on all actions by default" do
       plugin = Class.new(described_class) do
         action_hook("foo") { "bar" }
       end
 
-      hooks = plugin.action_hook("foo")
+      hooks_registry = plugin.components.action_hooks
+      hooks = hooks_registry[described_class.const_get("ALL_ACTIONS")]
+      hooks.length.should == 1
+      hooks[0].call.should == "bar"
+    end
+
+    it "should register for a specific action by default" do
+      plugin = Class.new(described_class) do
+        action_hook("foo", :bar) { "bar" }
+      end
+
+      hooks_registry = plugin.components.action_hooks
+      hooks = hooks_registry[:bar]
       hooks.length.should == 1
       hooks[0].call.should == "bar"
     end
@@ -136,24 +148,13 @@ describe Vagrant::Plugin::V2::Plugin do
     end
   end
 
-  describe "easy commands" do
-    it "should register with the commands" do
-      plugin = Class.new(described_class) do
-        easy_command("foo") {}
-      end
-
-      # Check that the command class subclasses the easy command base
-      plugin.command[:foo].should < Vagrant::Easy::CommandBase
-    end
-  end
-
   describe "guests" do
     it "should register guest classes" do
       plugin = Class.new(described_class) do
         guest("foo") { "bar" }
       end
 
-      plugin.guest[:foo].should == "bar"
+      plugin.components.guests[:foo].should == ["bar", nil]
     end
 
     it "should lazily register guest classes" do
@@ -172,6 +173,16 @@ describe Vagrant::Plugin::V2::Plugin do
       expect {
         plugin.guest[:foo]
       }.to raise_error(StandardError)
+    end
+  end
+
+  describe "guest capabilities" do
+    it "should register guest capabilities" do
+      plugin = Class.new(described_class) do
+        guest_capability("foo", "bar") { "baz" }
+      end
+
+      plugin.components.guest_capabilities[:foo][:bar].should == "baz"
     end
   end
 
@@ -209,7 +220,15 @@ describe Vagrant::Plugin::V2::Plugin do
         provider("foo") { "bar" }
       end
 
-      plugin.provider[:foo].should == "bar"
+      plugin.components.providers[:foo].should == ["bar", {}]
+    end
+
+    it "should register provider classes with options" do
+      plugin = Class.new(described_class) do
+        provider("foo", foo: "yep") { "bar" }
+      end
+
+      plugin.components.providers[:foo].should == ["bar", { foo: "yep" }]
     end
 
     it "should lazily register provider classes" do
@@ -226,7 +245,7 @@ describe Vagrant::Plugin::V2::Plugin do
       # Now verify when we actually get the configuration key that
       # a proper error is raised.
       expect {
-        plugin.provider[:foo]
+        plugin.components.providers[:foo]
       }.to raise_error(StandardError)
     end
   end

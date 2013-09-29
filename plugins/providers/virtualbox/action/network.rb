@@ -36,15 +36,12 @@ module VagrantPlugins
           end
 
           @logger.debug("Available slots for high-level adapters: #{available_slots.inspect}")
-          @logger.info("Determinging network adapters required for high-level configuration...")
+          @logger.info("Determining network adapters required for high-level configuration...")
           available_slots = available_slots.to_a.sort
-          env[:machine].config.vm.networks.each do |type, args|
+          env[:machine].config.vm.networks.each do |type, options|
             # We only handle private and public networks
             next if type != :private_network && type != :public_network
 
-            options = nil
-            options = args.last if args.last.is_a?(Hash)
-            options ||= {}
             options = scoped_hash_override(options, :virtualbox)
 
             # Figure out the slot that this adapter will go into
@@ -61,14 +58,10 @@ module VagrantPlugins
             data = nil
             if type == :private_network
               # private_network = hostonly
-
-              config_args = [args[0], options]
-              data        = [:hostonly, config_args]
+              data        = [:hostonly, options]
             elsif type == :public_network
               # public_network = bridged
-
-              config_args = [options]
-              data        = [:bridged, config_args]
+              data        = [:bridged, options]
             end
 
             # Store it!
@@ -80,13 +73,13 @@ module VagrantPlugins
           adapters = []
           networks = []
           network_adapters_config.each do |slot, data|
-            type = data[0]
-            args = data[1]
+            type    = data[0]
+            options = data[1]
 
             @logger.info("Network slot #{slot}. Type: #{type}.")
 
             # Get the normalized configuration for this type
-            config = send("#{type}_config", args)
+            config = send("#{type}_config", options)
             config[:adapter] = slot
             @logger.debug("Normalized configuration: #{config.inspect}")
 
@@ -118,19 +111,21 @@ module VagrantPlugins
 
             # Only configure the networks the user requested us to configure
             networks_to_configure = networks.select { |n| n[:auto_config] }
-            env[:ui].info I18n.t("vagrant.actions.vm.network.configuring")
-            env[:machine].guest.configure_networks(networks_to_configure)
+            if !networks_to_configure.empty?
+              env[:ui].info I18n.t("vagrant.actions.vm.network.configuring")
+              env[:machine].guest.capability(:configure_networks, networks_to_configure)
+            end
           end
         end
 
-        def bridged_config(args)
+        def bridged_config(options)
           return {
             :auto_config                     => true,
             :bridge                          => nil,
             :mac                             => nil,
             :nic_type                        => nil,
             :use_dhcp_assigned_default_route => false
-          }.merge(args[0] || {})
+          }.merge(options || {})
         end
 
         def bridged_adapter(config)
@@ -207,21 +202,40 @@ module VagrantPlugins
         end
 
         def bridged_network_config(config)
+          if config[:ip]
+            options = {
+                :auto_config => true,
+                :mac         => nil,
+                :netmask     => "255.255.255.0",
+                :type        => :static
+            }.merge(config)
+            options[:type] = options[:type].to_sym
+            return options
+          end
+
           return {
             :type => :dhcp,
             :use_dhcp_assigned_default_route => config[:use_dhcp_assigned_default_route]
           }
         end
 
-        def hostonly_config(args)
-          ip      = args[0]
+        def hostonly_config(options)
           options = {
             :auto_config => true,
-            :netmask     => "255.255.255.0"
-          }.merge(args[1] || {})
+            :mac         => nil,
+            :nic_type    => nil,
+            :netmask     => "255.255.255.0",
+            :type        => :static
+          }.merge(options)
+
+          # Make sure the type is a symbol
+          options[:type] = options[:type].to_sym
+
+          # Default IP is in the 20-bit private network block for DHCP based networks
+          options[:ip] = "172.28.128.1" if options[:type] == :dhcp && !options[:ip]
 
           # Calculate our network address for the given IP/netmask
-          netaddr  = network_address(ip, options[:netmask])
+          netaddr  = network_address(options[:ip], options[:netmask])
 
           # Verify that a host-only network subnet would not collide
           # with a bridged networking interface.
@@ -245,15 +259,33 @@ module VagrantPlugins
           adapter_ip[3] += 1
           options[:adapter_ip] ||= adapter_ip.join(".")
 
+          dhcp_options = {}
+          if options[:type] == :dhcp
+            # Calculate the DHCP server IP, which is the network address
+            # with the final octet + 2. So "172.28.0.0" turns into "172.28.0.2"
+            dhcp_ip    = ip_parts.dup
+            dhcp_ip[3] += 2
+            dhcp_options[:dhcp_ip] ||= dhcp_ip.join(".")
+
+            # Calculate the lower and upper bound for the DHCP server
+            dhcp_lower    = ip_parts.dup
+            dhcp_lower[3] += 3
+            dhcp_options[:dhcp_lower] ||= dhcp_lower.join(".")
+
+            dhcp_upper    = ip_parts.dup
+            dhcp_upper[3] = 254
+            dhcp_options[:dhcp_upper] ||= dhcp_upper.join(".")
+          end
+
           return {
-            :adapter_ip  => adapter_ip,
+            :adapter_ip  => options[:adapter_ip],
             :auto_config => options[:auto_config],
-            :ip          => ip,
-            :mac         => nil,
+            :ip          => options[:ip],
+            :mac         => options[:mac],
             :netmask     => options[:netmask],
-            :nic_type    => nil,
-            :type        => :static
-          }
+            :nic_type    => options[:nic_type],
+            :type        => options[:type]
+          }.merge(dhcp_options)
         end
 
         def hostonly_adapter(config)
@@ -272,6 +304,24 @@ module VagrantPlugins
             # Create a new network
             interface = hostonly_create_network(config)
             @logger.info("Created network: #{interface[:name]}")
+          end
+
+          if config[:type] == :dhcp
+            # Check that if there is a DHCP server attached on our interface,
+            # then it is identical. Otherwise, we can't set it.
+            if interface[:dhcp]
+              valid = interface[:dhcp][:ip] == config[:dhcp_ip] &&
+                  interface[:dhcp][:lower] == config[:dhcp_lower] &&
+                  interface[:dhcp][:upper] == config[:dhcp_upper]
+
+              raise Errors::NetworkDHCPAlreadyAttached if !valid
+
+              @logger.debug("DHCP server already properly configured")
+            else
+              # Configure the DHCP server for the network.
+              @logger.debug("Creating a DHCP server...")
+              @env[:machine].provider.driver.create_dhcp_server(interface[:name], config)
+            end
           end
 
           return {

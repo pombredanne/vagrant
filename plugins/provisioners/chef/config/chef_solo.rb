@@ -11,40 +11,82 @@ module VagrantPlugins
         attr_accessor :nfs
         attr_accessor :encrypted_data_bag_secret_key_path
         attr_accessor :encrypted_data_bag_secret
-
-        def encrypted_data_bag_secret; @encrypted_data_bag_secret || "/tmp/encrypted_data_bag_secret"; end
+        attr_accessor :environments_path
+        attr_accessor :environment
 
         def initialize
           super
 
-          @__default = ["cookbooks", [:vm, "cookbooks"]]
+          @cookbooks_path            = UNSET_VALUE
+          @data_bags_path            = UNSET_VALUE
+          @environments_path         = UNSET_VALUE
+          @environment               = UNSET_VALUE
+          @recipe_url                = UNSET_VALUE
+          @roles_path                = UNSET_VALUE
+          @nfs                       = UNSET_VALUE
+          @encrypted_data_bag_secret = UNSET_VALUE
+          @encrypted_data_bag_secret_key_path = UNSET_VALUE
         end
 
-        # Provide defaults in such a way that they won't override the instance
-        # variable. This is so merging continues to work properly.
-        def cookbooks_path
-          @cookbooks_path || _default_cookbook_path
-        end
+        #------------------------------------------------------------
+        # Internal methods
+        #------------------------------------------------------------
 
-        # This stores a reference to the default cookbook path which is used
-        # later. Do not use this publicly. I apologize for not making it
-        # "protected" but it has to be called by Vagrant internals later.
-        def _default_cookbook_path
-          @__default
-        end
+        def finalize!
+          super
 
-        def nfs
-          @nfs || false
+          @recipe_url = nil if @recipe_url == UNSET_VALUE
+          @environment = nil if @environment == UNSET_VALUE
+
+          if @cookbooks_path == UNSET_VALUE
+            @cookbooks_path = []
+            @cookbooks_path << [:host, "cookbooks"] if !@recipe_url
+            @cookbooks_path << [:vm, "cookbooks"]
+          end
+
+          @data_bags_path    = [] if @data_bags_path == UNSET_VALUE
+          @roles_path        = [] if @roles_path == UNSET_VALUE
+          @environments_path = [] if @environments_path == UNSET_VALUE
+          @environments_path = [@environments_path].flatten
+
+          # Make sure the path is an array.
+          @cookbooks_path    = prepare_folders_config(@cookbooks_path)
+          @data_bags_path    = prepare_folders_config(@data_bags_path)
+          @roles_path        = prepare_folders_config(@roles_path)
+          @environments_path = prepare_folders_config(@environments_path)
+
+          @nfs = false if @nfs == UNSET_VALUE
+          @encrypted_data_bag_secret = "/tmp/encrypted_data_bag_secret" if \
+            @encrypted_data_bag_secret == UNSET_VALUE
+          @encrypted_data_bag_secret_key_path = nil if \
+            @encrypted_data_bag_secret_key_path == UNSET_VALUE
         end
 
         def validate(machine)
-          errors = []
+          errors = _detected_errors
+          errors.concat(validate_base(machine))
           errors << I18n.t("vagrant.config.chef.cookbooks_path_empty") if \
             !cookbooks_path || [cookbooks_path].flatten.empty?
-          errors << I18n.t("vagrant.config.chef.run_list_empty") if \
-            !run_list || run_list.empty?
-
+          errors << I18n.t("vagrant.config.chef.environment_path_required") if \
+            environment && environments_path.empty?
           { "chef solo provisioner" => errors }
+        end
+
+        protected
+
+        # This takes any of the configurations that take a path or
+        # array of paths and turns it into the proper format.
+        #
+        # @return [Array]
+        def prepare_folders_config(config)
+          # Make sure the path is an array
+          config = [config] if !config.is_a?(Array) || config.first.is_a?(Symbol)
+
+          # Make sure all the paths are in the proper format
+          config.map do |path|
+            path = [:host, path] if !path.is_a?(Array)
+            path
+          end
         end
       end
     end

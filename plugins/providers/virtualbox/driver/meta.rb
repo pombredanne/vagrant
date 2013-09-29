@@ -32,7 +32,8 @@ module VagrantPlugins
           # specific driver to instantiate.
           begin
             @version = read_version || ""
-          rescue Vagrant::Util::Subprocess::LaunchError
+          rescue Vagrant::Errors::CommandUnavailable,
+            Vagrant::Errors::CommandUnavailableWindows
             # This means that VirtualBox was not found, so we raise this
             # error here.
             raise Vagrant::Errors::VirtualBoxNotDetected
@@ -45,6 +46,11 @@ module VagrantPlugins
             "4.1" => Version_4_1,
             "4.2" => Version_4_2
           }
+
+          if @version.start_with?("4.2.14")
+            # VirtualBox 4.2.14 just doesn't work with Vagrant, so show error
+            raise Vagrant::Errors::VirtualBoxBrokenVersion040214
+          end
 
           driver_klass = nil
           driver_map.each do |key, klass|
@@ -93,6 +99,7 @@ module VagrantPlugins
           :read_state,
           :read_used_ports,
           :read_vms,
+          :resume,
           :set_mac_address,
           :set_name,
           :share_folders,
@@ -120,7 +127,8 @@ module VagrantPlugins
           # Note: We split this into multiple lines because apparently "".split("_")
           # is [], so we have to check for an empty array in between.
           output = execute("--version")
-          if output =~ /vboxdrv kernel module is not loaded/
+          if output =~ /vboxdrv kernel module is not loaded/ ||
+            output =~ /VirtualBox kernel modules are not loaded/i
             raise Vagrant::Errors::VirtualBoxKernelModuleNotLoaded
           elsif output =~ /Please install/
             # Check for installation incomplete warnings, for example:

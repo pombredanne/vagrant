@@ -1,3 +1,5 @@
+require "set"
+
 require File.expand_path("../../../../base", __FILE__)
 
 describe Vagrant::Config::V2::Root do
@@ -13,9 +15,15 @@ describe Vagrant::Config::V2::Root do
     instance.foo.should eql(foo)
   end
 
-  it "should raise a proper NoMethodError if a config key doesn't exist" do
+  it "record a missing key call if invalid key used" do
     instance = described_class.new({})
-    expect { instance.foo }.to raise_error(NoMethodError)
+    expect { instance.foo }.to_not raise_error
+    instance.__internal_state["missing_key_calls"].include?("foo").should be
+  end
+
+  it "returns a dummy config for a missing key" do
+    instance = described_class.new({})
+    expect { instance.foo.foo = "bar" }.to_not raise_error
   end
 
   it "can be created with initial state" do
@@ -27,9 +35,28 @@ describe Vagrant::Config::V2::Root do
     map      = { "foo" => Object, "bar" => Object }
     instance = described_class.new(map)
     instance.__internal_state.should == {
-      "config_map" => map,
-      "keys"       => {}
+      "config_map"        => map,
+      "keys"              => {},
+      "missing_key_calls" => Set.new
     }
+  end
+
+  describe "finalization" do
+    it "should finalize un-used keys" do
+      foo_class = Class.new do
+        attr_accessor :foo
+
+        def finalize!
+          @foo = "SET"
+        end
+      end
+
+      map = { :foo => foo_class }
+      instance = described_class.new(map)
+      instance.finalize!
+
+      instance.foo.foo.should == "SET"
+    end
   end
 
   describe "validation" do

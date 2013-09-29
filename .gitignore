@@ -4,15 +4,15 @@
 # Vagrant stuff
 acceptance_config.yml
 boxes/*
-Vagrantfile
-.vagrant
+/Vagrantfile
+/.vagrant
 
 # Bundler/Rubygems
 *.gem
 .bundle
 pkg/*
 tags
-Gemfile.lock
+/Gemfile.lock
 test/tmp/
 
 # Documentation
@@ -29,3 +29,19 @@ doc/
 # IDE junk
 .idea/*
 *.iml
+
+# Ruby Managers
+.rbenv
+.ruby-gemset
+.ruby-version
+.rvmrc
+
+# Website: docs
+website/docs/.sass-cache
+website/docs/build
+website/docs/Rakefile
+
+# Website: www
+website/www/.sass-cache
+website/www/build
+website/www/Rakefile

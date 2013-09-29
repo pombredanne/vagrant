@@ -1,5 +1,7 @@
 require 'log4r'
 
+require "vagrant/util/platform"
+
 require File.expand_path("../base", __FILE__)
 
 module VagrantPlugins
@@ -138,9 +140,9 @@ module VagrantPlugins
           ports.each do |options|
             pf_builder = [options[:name],
               options[:protocol] || "tcp",
-              "",
+              options[:hostip] || "",
               options[:hostport],
-              "",
+              options[:guestip] || "",
               options[:guestport]]
 
             args.concat(["--natpf#{options[:adapter] || 1}",
@@ -155,6 +157,8 @@ module VagrantPlugins
         end
 
         def import(ovf)
+          ovf = Vagrant::Util::Platform.cygwin_windows_path(ovf)
+
           output = ""
           total = ""
           last  = 0
@@ -196,6 +200,10 @@ module VagrantPlugins
           end
 
           nil
+        end
+
+        def max_network_adapters
+          36
         end
 
         def read_forwarded_ports(uuid=nil, active_only=false)
@@ -260,6 +268,13 @@ module VagrantPlugins
             return value.split("_").first
           end
 
+          # If we can't get the guest additions version by guest property, try
+          # to get it from the VM info itself.
+          info = execute("showvminfo", @uuid, "--machinereadable", :retryable => true)
+          info.split("\n").each do |line|
+            return $1.to_s if line =~ /^GuestAdditionsVersion="(.+?)"$/
+          end
+
           return nil
         end
 
@@ -313,6 +328,19 @@ module VagrantPlugins
           end
 
           nil
+        end
+
+        def read_mac_addresses
+          macs = {}
+          info = execute("showvminfo", @uuid, "--machinereadable", :retryable => true)
+          info.split("\n").each do |line|
+            if matcher = /^macaddress(\d+)="(.+?)"$/.match(line)
+              adapter = matcher[1].to_i
+              mac = matcher[2].to_s
+              macs[adapter] = mac
+            end
+          end
+          macs
         end
 
         def read_machine_folder
@@ -383,10 +411,10 @@ module VagrantPlugins
         end
 
         def read_vms
-          results = []
+          results = {}
           execute("list", "vms", :retryable => true).split("\n").each do |line|
-            if line =~ /^".+?" \{(.+?)\}$/
-              results << $1.to_s
+            if line =~ /^"(.+?)" \{(.+?)\}$/
+              results[$1.to_s] = $2.to_s
             end
           end
 
@@ -398,7 +426,7 @@ module VagrantPlugins
         end
 
         def set_name(name)
-          execute("modifyvm", @uuid, "--name", name)
+          execute("modifyvm", @uuid, "--name", name, :retryable => true)
         end
 
         def share_folders(folders)
@@ -408,7 +436,12 @@ module VagrantPlugins
               "--hostpath",
               folder[:hostpath]]
             args << "--transient" if folder.has_key?(:transient) && folder[:transient]
+
+            # Add the shared folder
             execute("sharedfolder", "add", @uuid, *args)
+
+            # Enable symlinks on the shared folder
+            execute("setextradata", @uuid, "VBoxInternal2/SharedFoldersEnableSymlinksCreate/#{folder[:name]}", "1")
           end
         end
 
@@ -423,6 +456,11 @@ module VagrantPlugins
           nil
         end
 
+        def resume
+          @logger.debug("Resuming paused VM...")
+          execute("controlvm", @uuid, "resume")
+        end
+
         def start(mode)
           command = ["startvm", @uuid, "--type", mode.to_s]
           r = raw(*command)
@@ -434,7 +472,7 @@ module VagrantPlugins
           end
 
           # If we reached this point then it didn't work out.
-          raise Errors::VBoxManageError, :command => command.inspect
+          raise Vagrant::Errors::VBoxManageError, :command => command.inspect
         end
 
         def suspend

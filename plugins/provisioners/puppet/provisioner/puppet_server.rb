@@ -29,7 +29,7 @@ module VagrantPlugins
           if config.puppet_node
             # If a node name is given, we use that directly for the certname
             cn = config.puppet_node
-          elsif @machine.config.vm.host_name
+          elsif @machine.config.vm.hostname
             # If a host name is given, we explicitly set the certname to
             # nil so that the hostname becomes the cert name.
             cn = nil
@@ -40,6 +40,12 @@ module VagrantPlugins
 
           # Add the certname option if there is one
           options += ["--certname", cn] if cn
+
+          # Disable colors if we must
+          if !@machine.env.ui.is_a?(Vagrant::UI::Colored)
+            options << "--color=false"
+          end
+
           options = options.join(" ")
 
           # Build up the custom facts if we have any
@@ -57,8 +63,9 @@ module VagrantPlugins
 
           @machine.env.ui.info I18n.t("vagrant.provisioners.puppet_server.running_puppetd")
           @machine.communicate.sudo(command) do |type, data|
-            data.chomp!
-            @machine.env.ui.info(data, :prefix => false) if !data.empty?
+            if !data.empty?
+              @machine.env.ui.info(data, :new_line => false, :prefix => false)
+            end
           end
         end
       end
