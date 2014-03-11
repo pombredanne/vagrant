@@ -12,18 +12,10 @@ module VagrantPlugins
       end
 
       guest_capability("ubuntu", "change_host_name") do
+        # ubuntu is just just a specialization of the debian code for this capability
+        require_relative "../debian/cap/change_host_name"
         require_relative "cap/change_host_name"
         Cap::ChangeHostName
-      end
-
-      guest_capability("ubuntu", "mount_nfs_folder") do
-        require_relative "cap/mount_nfs"
-        Cap::MountNFS
-      end
-
-      guest_capability("ubuntu", "mount_virtualbox_shared_folder") do
-        require_relative "cap/mount_virtualbox_shared_folder"
-        Cap::MountVirtualBoxSharedFolder
       end
     end
   end

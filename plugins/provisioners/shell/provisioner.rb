@@ -8,7 +8,13 @@ module VagrantPlugins
     class Provisioner < Vagrant.plugin("2", :provisioner)
       def provision
         args = ""
-        args = " #{config.args}" if config.args
+        if config.args.is_a?(String)
+          args = " #{config.args.to_s}"
+        elsif config.args.is_a?(Array)
+          args = config.args.map { |a| quote_and_escape(a) }
+          args = " #{args.join(" ")}"
+        end
+
         command = "chmod +x #{config.upload_path} && #{config.upload_path}#{args}"
 
         with_script_file do |path|
@@ -22,10 +28,10 @@ module VagrantPlugins
             comm.upload(path.to_s, config.upload_path)
 
             if config.path
-              @machine.ui.info(I18n.t("vagrant.provisioners.shell.running",
+              @machine.ui.detail(I18n.t("vagrant.provisioners.shell.running",
                                       script: path.to_s))
             else
-              @machine.ui.info(I18n.t("vagrant.provisioners.shell.running",
+              @machine.ui.detail(I18n.t("vagrant.provisioners.shell.running",
                                       script: "inline script"))
             end
 
@@ -35,11 +41,13 @@ module VagrantPlugins
                 # Output the data with the proper color based on the stream.
                 color = type == :stdout ? :green : :red
 
-                # Note: Be sure to chomp the data to avoid the newlines that the
-                # Chef outputs.
-                @machine.env.ui.info(
-                  data,
-                  :color => color, :new_line => false, :prefix => false)
+                options = {
+                  new_line: false,
+                  prefix: false,
+                }
+                options[:color] = color if !config.keep_color
+
+                @machine.env.ui.info(data, options)
               end
             end
           end
@@ -47,6 +55,11 @@ module VagrantPlugins
       end
 
       protected
+
+      # Quote and escape strings for shell execution, thanks to Capistrano.
+      def quote_and_escape(text, quote = '"')
+        "#{quote}#{text.gsub(/#{quote}/) { |m| "#{m}\\#{m}#{m}" }}#{quote}"
+      end
 
       # This method yields the path to a script to upload and execute
       # on the remote server. This method will properly clean up the

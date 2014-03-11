@@ -54,14 +54,21 @@ module VagrantPlugins
               slot = available_slots.shift
             end
 
+            # Internal network is a special type
+            if type == :private_network && options[:intnet]
+              type = :internal_network
+            end
+
             # Configure it
             data = nil
             if type == :private_network
               # private_network = hostonly
-              data        = [:hostonly, options]
+              data = [:hostonly, options]
             elsif type == :public_network
               # public_network = bridged
-              data        = [:bridged, options]
+              data = [:bridged, options]
+            elsif type == :internal_network
+              data = [:intnet, options]
             end
 
             # Store it!
@@ -97,7 +104,16 @@ module VagrantPlugins
           if !adapters.empty?
             # Enable the adapters
             @logger.info("Enabling adapters...")
-            env[:ui].info I18n.t("vagrant.actions.vm.network.preparing")
+            env[:ui].output(I18n.t("vagrant.actions.vm.network.preparing"))
+            adapters.each do |adapter|
+              env[:ui].detail(I18n.t(
+                "vagrant.virtualbox.network_adapter",
+                adapter: adapter[:adapter].to_s,
+                type: adapter[:type].to_s,
+                extra: "",
+              ))
+            end
+
             env[:machine].provider.driver.enable_adapters(adapters)
           end
 
@@ -314,7 +330,7 @@ module VagrantPlugins
                   interface[:dhcp][:lower] == config[:dhcp_lower] &&
                   interface[:dhcp][:upper] == config[:dhcp_upper]
 
-              raise Errors::NetworkDHCPAlreadyAttached if !valid
+              raise Vagrant::Errors::NetworkDHCPAlreadyAttached if !valid
 
               @logger.debug("DHCP server already properly configured")
             else
@@ -339,6 +355,39 @@ module VagrantPlugins
             :adapter_ip => config[:adapter_ip],
             :ip         => config[:ip],
             :netmask    => config[:netmask]
+          }
+        end
+
+        def intnet_config(options)
+          return {
+            :type => "static",
+            :ip => nil,
+            :netmask => "255.255.255.0",
+            :adapter => nil,
+            :mac => nil,
+            :intnet => nil,
+            :auto_config => true
+          }.merge(options || {})
+        end
+
+        def intnet_adapter(config)
+          intnet_name = config[:intnet]
+          intnet_name = "intnet" if intnet_name == true
+
+          return {
+            :adapter => config[:adapter],
+            :type => :intnet,
+            :mac_address => config[:mac],
+            :nic_type => config[:nic_type],
+            :intnet => intnet_name,
+          }
+        end
+
+        def intnet_network_config(config)
+          return {
+            :type => config[:type],
+            :ip => config[:ip],
+            :netmask => config[:netmask]
           }
         end
 

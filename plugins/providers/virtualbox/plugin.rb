@@ -18,6 +18,16 @@ module VagrantPlugins
         require File.expand_path("../config", __FILE__)
         Config
       end
+
+      synced_folder(:virtualbox) do
+        require File.expand_path("../synced_folder", __FILE__)
+        SyncedFolder
+      end
+
+      provider_capability(:virtualbox, :forwarded_ports) do
+        require_relative "cap"
+        Cap
+      end
     end
 
     autoload :Action, File.expand_path("../action", __FILE__)
@@ -29,6 +39,7 @@ module VagrantPlugins
       autoload :Version_4_0, File.expand_path("../driver/version_4_0", __FILE__)
       autoload :Version_4_1, File.expand_path("../driver/version_4_1", __FILE__)
       autoload :Version_4_2, File.expand_path("../driver/version_4_2", __FILE__)
+      autoload :Version_4_3, File.expand_path("../driver/version_4_3", __FILE__)
     end
 
     module Model

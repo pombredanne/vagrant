@@ -5,13 +5,15 @@ require "tempfile"
 require "tmpdir"
 
 require "vagrant/util/file_mode"
+require "vagrant/util/platform"
 
 describe Vagrant::Environment do
   include_context "unit"
+  include_context "capability_helpers"
 
   let(:env) do
     isolated_environment.tap do |e|
-      e.box2("base", :virtualbox)
+      e.box3("base", "1.0", :virtualbox)
       e.vagrantfile <<-VF
       Vagrant.configure("2") do |config|
         config.vm.box = "base"
@@ -21,8 +23,537 @@ describe Vagrant::Environment do
   end
 
   let(:instance)  { env.create_vagrant_env }
-
   subject { instance }
+
+  describe "#home_path" do
+    it "is set to the home path given" do
+      Dir.mktmpdir do |dir|
+        instance = described_class.new(:home_path => dir)
+        instance.home_path.should == Pathname.new(dir)
+      end
+    end
+
+    it "is set to the environmental variable VAGRANT_HOME" do
+      Dir.mktmpdir do |dir|
+        instance = with_temp_env("VAGRANT_HOME" => dir) do
+          described_class.new
+        end
+
+        instance.home_path.should == Pathname.new(dir)
+      end
+    end
+
+    it "throws an exception if inaccessible" do
+      expect {
+        described_class.new(:home_path => "/")
+      }.to raise_error(Vagrant::Errors::HomeDirectoryNotAccessible)
+    end
+
+    context "with setup version file" do
+      it "creates a setup version flie" do
+        path = subject.home_path.join("setup_version")
+        expect(path).to be_file
+        expect(path.read).to eq(Vagrant::Environment::CURRENT_SETUP_VERSION)
+      end
+
+      it "is okay if it has the current version" do
+        Dir.mktmpdir do |dir|
+          Pathname.new(dir).join("setup_version").open("w") do |f|
+            f.write(Vagrant::Environment::CURRENT_SETUP_VERSION)
+          end
+
+          instance = described_class.new(home_path: dir)
+          path = instance.home_path.join("setup_version")
+          expect(path).to be_file
+          expect(path.read).to eq(Vagrant::Environment::CURRENT_SETUP_VERSION)
+        end
+      end
+
+      it "raises an exception if the version is newer than ours" do
+        Dir.mktmpdir do |dir|
+          Pathname.new(dir).join("setup_version").open("w") do |f|
+            f.write("100.5")
+          end
+
+          expect { described_class.new(home_path: dir) }.
+            to raise_error(Vagrant::Errors::HomeDirectoryLaterVersion)
+        end
+      end
+
+      it "raises an exception if there is an unknown home directory version" do
+        Dir.mktmpdir do |dir|
+          Pathname.new(dir).join("setup_version").open("w") do |f|
+            f.write("0.7")
+          end
+
+          expect { described_class.new(home_path: dir) }.
+            to raise_error(Vagrant::Errors::HomeDirectoryUnknownVersion)
+        end
+      end
+    end
+
+    context "upgrading a v1.1 directory structure" do
+      let(:env) { isolated_environment }
+
+      before do
+        env.homedir.join("setup_version").open("w") do |f|
+          f.write("1.1")
+        end
+      end
+
+      it "replaces the setup version with the new version" do
+        expect(subject.home_path.join("setup_version").read).
+          to eq(Vagrant::Environment::CURRENT_SETUP_VERSION)
+      end
+
+      it "moves the boxes into the new directory structure" do
+        # Kind of hacky but avoids two instantiations of BoxCollection
+        Vagrant::Environment.any_instance.stub(boxes: double("boxes"))
+
+        collection = double("collection")
+        Vagrant::BoxCollection.should_receive(:new).with(
+          env.homedir.join("boxes"), anything).and_return(collection)
+        collection.should_receive(:upgrade_v1_1_v1_5).once
+        subject
+      end
+    end
+  end
+
+  describe "#host" do
+    let(:plugin_hosts) { {} }
+    let(:plugin_host_caps) { {} }
+
+    before do
+      m = Vagrant.plugin("2").manager
+      m.stub(hosts: plugin_hosts)
+      m.stub(host_capabilities: plugin_host_caps)
+    end
+
+    it "should default to some host even if there are none" do
+      env.vagrantfile <<-VF
+      Vagrant.configure("2") do |config|
+        config.vagrant.host = nil
+      end
+      VF
+
+      expect(subject.host).to be
+    end
+
+    it "should attempt to detect a host if no host is set" do
+      env.vagrantfile <<-VF
+      Vagrant.configure("2") do |config|
+        config.vagrant.host = nil
+      end
+      VF
+
+      plugin_hosts[:foo] = [detect_class(true), nil]
+      plugin_host_caps[:foo] = { bar: Class }
+
+      result = subject.host
+      expect(result.capability?(:bar)).to be_true
+    end
+
+    it "should attempt to detect a host if host is :detect" do
+      env.vagrantfile <<-VF
+      Vagrant.configure("2") do |config|
+        config.vagrant.host = :detect
+      end
+      VF
+
+      plugin_hosts[:foo] = [detect_class(true), nil]
+      plugin_host_caps[:foo] = { bar: Class }
+
+      result = subject.host
+      expect(result.capability?(:bar)).to be_true
+    end
+
+    it "should use an exact host if specified" do
+      env.vagrantfile <<-VF
+      Vagrant.configure("2") do |config|
+        config.vagrant.host = "foo"
+      end
+      VF
+
+      plugin_hosts[:foo] = [detect_class(false), nil]
+      plugin_hosts[:bar] = [detect_class(true), nil]
+      plugin_host_caps[:foo] = { bar: Class }
+
+      result = subject.host
+      expect(result.capability?(:bar)).to be_true
+    end
+
+    it "should raise an error if an exact match was specified but not found" do
+      env.vagrantfile <<-VF
+      Vagrant.configure("2") do |config|
+        config.vagrant.host = "bar"
+      end
+      VF
+
+      expect { subject.host }.
+        to raise_error(Vagrant::Errors::HostExplicitNotDetected)
+    end
+  end
+
+  describe "#lock" do
+    it "does nothing if no block is given" do
+      subject.lock
+    end
+
+    it "locks the environment" do
+      another = env.create_vagrant_env
+      raised  = false
+
+      subject.lock do
+        begin
+          another.lock {}
+        rescue Vagrant::Errors::EnvironmentLockedError
+          raised = true
+        end
+      end
+
+      expect(raised).to be_true
+    end
+
+    it "allows nested locks on the same environment" do
+      success = false
+
+      subject.lock do
+        subject.lock do
+          success = true
+        end
+      end
+
+      expect(success).to be_true
+    end
+  end
+
+  describe "#machine" do
+    # A helper to register a provider for use in tests.
+    def register_provider(name, config_class=nil, options=nil)
+      provider_cls = Class.new(Vagrant.plugin("2", :provider))
+
+      register_plugin("2") do |p|
+        p.provider(name, options) { provider_cls }
+
+        if config_class
+          p.config(name, :provider) { config_class }
+        end
+      end
+
+      provider_cls
+    end
+
+    it "should return a machine object with the correct provider" do
+      # Create a provider
+      foo_provider = register_provider("foo")
+
+      # Create the configuration
+      isolated_env = isolated_environment do |e|
+        e.vagrantfile(<<-VF)
+Vagrant.configure("2") do |config|
+  config.vm.box = "base"
+  config.vm.define "foo"
+end
+VF
+
+        e.box3("base", "1.0", :foo)
+      end
+
+      # Verify that we can get the machine
+      env = isolated_env.create_vagrant_env
+      machine = env.machine(:foo, :foo)
+      machine.should be_kind_of(Vagrant::Machine)
+      machine.name.should == :foo
+      machine.provider.should be_kind_of(foo_provider)
+      machine.provider_config.should be_nil
+    end
+
+    it "should return a machine object with the machine configuration" do
+      # Create a provider
+      foo_config = Class.new(Vagrant.plugin("2", :config)) do
+        attr_accessor :value
+      end
+
+      foo_provider = register_provider("foo", foo_config)
+
+      # Create the configuration
+      isolated_env = isolated_environment do |e|
+        e.vagrantfile(<<-VF)
+Vagrant.configure("2") do |config|
+  config.vm.box = "base"
+  config.vm.define "foo"
+
+  config.vm.provider :foo do |fooconfig|
+    fooconfig.value = 100
+  end
+end
+VF
+
+        e.box3("base", "1.0", :foo)
+      end
+
+      # Verify that we can get the machine
+      env = isolated_env.create_vagrant_env
+      machine = env.machine(:foo, :foo)
+      machine.should be_kind_of(Vagrant::Machine)
+      machine.name.should == :foo
+      machine.provider.should be_kind_of(foo_provider)
+      machine.provider_config.value.should == 100
+    end
+
+    it "should cache the machine objects by name and provider" do
+      # Create a provider
+      foo_provider = register_provider("foo")
+      bar_provider = register_provider("bar")
+
+      # Create the configuration
+      isolated_env = isolated_environment do |e|
+        e.vagrantfile(<<-VF)
+Vagrant.configure("2") do |config|
+  config.vm.box = "base"
+  config.vm.define "vm1"
+  config.vm.define "vm2"
+end
+VF
+
+        e.box3("base", "1.0", :foo)
+        e.box3("base", "1.0", :bar)
+      end
+
+      env = isolated_env.create_vagrant_env
+      vm1_foo = env.machine(:vm1, :foo)
+      vm1_bar = env.machine(:vm1, :bar)
+      vm2_foo = env.machine(:vm2, :foo)
+
+      vm1_foo.should eql(env.machine(:vm1, :foo))
+      vm1_bar.should eql(env.machine(:vm1, :bar))
+      vm1_foo.should_not eql(vm1_bar)
+      vm2_foo.should eql(env.machine(:vm2, :foo))
+    end
+
+    it "should load a machine without a box" do
+      register_provider("foo")
+
+      environment = isolated_environment do |env|
+        env.vagrantfile(<<-VF)
+Vagrant.configure("2") do |config|
+  config.vm.box = "i-dont-exist"
+end
+VF
+      end
+
+      env = environment.create_vagrant_env
+      machine = env.machine(:default, :foo)
+      machine.box.should be_nil
+    end
+
+    it "should load the machine configuration" do
+      register_provider("foo")
+
+      environment = isolated_environment do |env|
+        env.vagrantfile(<<-VF)
+Vagrant.configure("2") do |config|
+  config.ssh.port = 1
+  config.vm.box = "base"
+
+  config.vm.define "vm1" do |inner|
+    inner.ssh.port = 100
+  end
+end
+VF
+
+        env.box3("base", "1.0", :foo)
+      end
+
+      env = environment.create_vagrant_env
+      machine = env.machine(:vm1, :foo)
+      machine.config.ssh.port.should == 100
+      machine.config.vm.box.should == "base"
+    end
+
+    it "should load the box configuration for a box" do
+      register_provider("foo")
+
+      environment = isolated_environment do |env|
+        env.vagrantfile(<<-VF)
+Vagrant.configure("2") do |config|
+  config.vm.box = "base"
+end
+VF
+
+        env.box3("base", "1.0", :foo, :vagrantfile => <<-VF)
+Vagrant.configure("2") do |config|
+  config.ssh.port = 100
+end
+VF
+      end
+
+      env = environment.create_vagrant_env
+      machine = env.machine(:default, :foo)
+      machine.config.ssh.port.should == 100
+    end
+
+    it "should load the box configuration for a box and custom Vagrantfile name" do
+      register_provider("foo")
+
+      environment = isolated_environment do |env|
+        env.file("some_other_name", <<-VF)
+Vagrant.configure("2") do |config|
+  config.vm.box = "base"
+end
+VF
+
+        env.box3("base", "1.0", :foo, :vagrantfile => <<-VF)
+Vagrant.configure("2") do |config|
+  config.ssh.port = 100
+end
+VF
+      end
+
+      env = with_temp_env("VAGRANT_VAGRANTFILE" => "some_other_name") do
+        environment.create_vagrant_env
+      end
+
+      machine = env.machine(:default, :foo)
+      machine.config.ssh.port.should == 100
+    end
+
+    it "should load the box configuration for other formats for a box" do
+      register_provider("foo", nil, box_format: "bar")
+
+      environment = isolated_environment do |env|
+        env.vagrantfile(<<-VF)
+Vagrant.configure("2") do |config|
+  config.vm.box = "base"
+end
+VF
+
+        env.box3("base", "1.0", :bar, :vagrantfile => <<-VF)
+Vagrant.configure("2") do |config|
+  config.ssh.port = 100
+end
+VF
+      end
+
+      env = environment.create_vagrant_env
+      machine = env.machine(:default, :foo)
+      machine.config.ssh.port.should == 100
+    end
+
+    it "prefer sooner formats when multiple box formats are available" do
+      register_provider("foo", nil, box_format: ["fA", "fB"])
+
+      environment = isolated_environment do |env|
+        env.vagrantfile(<<-VF)
+Vagrant.configure("2") do |config|
+  config.vm.box = "base"
+end
+VF
+
+        env.box3("base", "1.0", :fA, :vagrantfile => <<-VF)
+Vagrant.configure("2") do |config|
+  config.ssh.port = 100
+end
+VF
+
+        env.box3("base", "1.0", :fB, :vagrantfile => <<-VF)
+Vagrant.configure("2") do |config|
+  config.ssh.port = 200
+end
+VF
+      end
+
+      env = environment.create_vagrant_env
+      machine = env.machine(:default, :foo)
+      machine.config.ssh.port.should == 100
+    end
+
+    it "should load the proper version of a box" do
+      register_provider("foo")
+
+      environment = isolated_environment do |env|
+        env.vagrantfile(<<-VF)
+Vagrant.configure("2") do |config|
+  config.vm.box = "base"
+  config.vm.box_version = "~> 1.2"
+end
+VF
+
+        env.box3("base", "1.0", :foo, :vagrantfile => <<-VF)
+Vagrant.configure("2") do |config|
+  config.ssh.port = 100
+end
+VF
+
+        env.box3("base", "1.5", :foo, :vagrantfile => <<-VF)
+Vagrant.configure("2") do |config|
+  config.ssh.port = 200
+end
+VF
+      end
+
+      env = environment.create_vagrant_env
+      machine = env.machine(:default, :foo)
+      machine.config.ssh.port.should == 200
+    end
+
+    it "should load the provider override if set" do
+      register_provider("bar")
+      register_provider("foo")
+
+      isolated_env = isolated_environment do |e|
+        e.vagrantfile(<<-VF)
+Vagrant.configure("2") do |config|
+  config.vm.box = "foo"
+
+  config.vm.provider :foo do |_, c|
+    c.vm.box = "bar"
+  end
+end
+VF
+      end
+
+      env = isolated_env.create_vagrant_env
+      foo_vm = env.machine(:default, :foo)
+      bar_vm = env.machine(:default, :bar)
+      foo_vm.config.vm.box.should == "bar"
+      bar_vm.config.vm.box.should == "foo"
+    end
+
+    it "should reload the cache if refresh is set" do
+      # Create a provider
+      foo_provider = register_provider("foo")
+
+      # Create the configuration
+      isolated_env = isolated_environment do |e|
+        e.vagrantfile(<<-VF)
+Vagrant.configure("2") do |config|
+  config.vm.box = "base"
+end
+VF
+
+        e.box3("base", "1.0", :foo)
+      end
+
+      env = isolated_env.create_vagrant_env
+      vm1 = env.machine(:default, :foo)
+      vm2 = env.machine(:default, :foo, true)
+      vm3 = env.machine(:default, :foo)
+
+      vm1.should_not eql(vm2)
+      vm2.should eql(vm3)
+    end
+
+    it "should raise an error if the VM is not found" do
+      expect { instance.machine("i-definitely-dont-exist", :virtualbox) }.
+        to raise_error(Vagrant::Errors::MachineNotFound)
+    end
+
+    it "should raise an error if the provider is not found" do
+      expect { instance.machine(:default, :lol_no) }.
+        to raise_error(Vagrant::Errors::ProviderNotFound)
+    end
+  end
 
   describe "active machines" do
     it "should be empty if the machines folder doesn't exist" do
@@ -135,64 +666,6 @@ describe Vagrant::Environment do
     end
   end
 
-  describe "home path" do
-    it "is set to the home path given" do
-      Dir.mktmpdir do |dir|
-        instance = described_class.new(:home_path => dir)
-        instance.home_path.should == Pathname.new(dir)
-      end
-    end
-
-    it "is set to the environmental variable VAGRANT_HOME" do
-      Dir.mktmpdir do |dir|
-        instance = with_temp_env("VAGRANT_HOME" => dir) do
-          described_class.new
-        end
-
-        instance.home_path.should == Pathname.new(dir)
-      end
-    end
-
-    context "default home path" do
-      before :each do
-        Vagrant::Util::Platform.stub(:windows? => false)
-      end
-
-      it "is set to '~/.vagrant.d' by default" do
-        expected = Pathname.new(File.expand_path("~/.vagrant.d"))
-        described_class.new.home_path.should == expected
-      end
-
-      it "is set to '~/.vagrant.d' if on Windows but no USERPROFILE" do
-        Vagrant::Util::Platform.stub(:windows? => true)
-
-        expected = Pathname.new(File.expand_path("~/.vagrant.d"))
-
-        with_temp_env("USERPROFILE" => nil) do
-          described_class.new.home_path.should == expected
-        end
-      end
-
-      it "is set to '%USERPROFILE%/.vagrant.d' if on Windows and USERPROFILE is set" do
-        Vagrant::Util::Platform.stub(:windows? => true)
-
-        Dir.mktmpdir do |dir|
-          expected = Pathname.new(File.expand_path("#{dir}/.vagrant.d"))
-
-          with_temp_env("USERPROFILE" => dir) do
-            described_class.new.home_path.should == expected
-          end
-        end
-      end
-    end
-
-    it "throws an exception if inaccessible" do
-      expect {
-        described_class.new(:home_path => "/")
-      }.to raise_error(Vagrant::Errors::HomeDirectoryNotAccessible)
-    end
-  end
-
   describe "local data path" do
     it "is set to the proper default" do
       default = instance.root_path.join(described_class::DEFAULT_LOCAL_DATA)
@@ -212,7 +685,12 @@ describe Vagrant::Environment do
     end
 
     describe "upgrading V1 dotfiles" do
-      let(:v1_dotfile_tempfile) { Tempfile.new("vagrant") }
+      let(:v1_dotfile_tempfile) do
+        Tempfile.new("vagrant").tap do |f|
+          f.close
+        end
+      end
+
       let(:v1_dotfile)          { Pathname.new(v1_dotfile_tempfile.path) }
       let(:local_data_path)     { v1_dotfile_tempfile.path }
       let(:instance) { described_class.new(:local_data_path => local_data_path) }
@@ -268,7 +746,10 @@ describe Vagrant::Environment do
 
       pk = env.homedir.join("insecure_private_key")
       pk.should be_exist
-      Vagrant::Util::FileMode.from_octal(pk.stat.mode).should == "600"
+
+      if !Vagrant::Util::Platform.windows?
+        Vagrant::Util::FileMode.from_octal(pk.stat.mode).should == "600"
+      end
     end
   end
 
@@ -276,6 +757,11 @@ describe Vagrant::Environment do
     collection = instance.boxes
     collection.should be_kind_of(Vagrant::BoxCollection)
     collection.directory.should == instance.boxes_path
+
+    # Reach into some internal state here but not sure how else
+    # to test this at the moment.
+    expect(collection.instance_variable_get(:@hook)).
+      to eq(instance.method(:hook))
   end
 
   describe "action runner" do
@@ -308,6 +794,30 @@ describe Vagrant::Environment do
 
       instance.hook(:bar).should == :foo
     end
+
+    it "should allow passing in a custom action runner" do
+      instance.action_runner.should_not_receive(:run)
+      other_runner = double("runner")
+      other_runner.should_receive(:run).and_return(:foo)
+
+      instance.hook(:bar, runner: other_runner).should == :foo
+    end
+
+    it "should allow passing in custom data" do
+      instance.action_runner.should_receive(:run).with do |callable, env|
+        env[:foo].should == :bar
+      end
+
+      instance.hook(:foo, foo: :bar)
+    end
+
+    it "should allow passing a custom callable" do
+      instance.action_runner.should_receive(:run).with do |callable, env|
+        callable.should == :what
+      end
+
+      instance.hook(:foo, callable: :what)
+    end
   end
 
   describe "primary machine name" do
@@ -325,7 +835,7 @@ Vagrant.configure("2") do |config|
 end
 VF
 
-        env.box2("base", :virtualbox)
+        env.box3("base", "1.0", :virtualbox)
       end
 
       env = environment.create_vagrant_env
@@ -342,7 +852,7 @@ Vagrant.configure("2") do |config|
 end
 VF
 
-        env.box2("base", :virtualbox)
+        env.box3("base", "1.0", :virtualbox)
       end
 
       env = environment.create_vagrant_env
@@ -361,7 +871,7 @@ VF
       end
 
       env = environment.create_vagrant_env
-      env.config_global.ssh.port.should == 200
+      env.vagrantfile.config.ssh.port.should == 200
     end
 
     it "should load from a custom Vagrantfile" do
@@ -374,7 +884,7 @@ VF
       end
 
       env = environment.create_vagrant_env(:vagrantfile_name => "non_standard_name")
-      env.config_global.ssh.port.should == 200
+      env.vagrantfile.config.ssh.port.should == 200
     end
 
     it "should load from a custom Vagrantfile specified by env var" do
@@ -390,7 +900,7 @@ VF
         environment.create_vagrant_env
       end
 
-      env.config_global.ssh.port.should == 400
+      env.vagrantfile.config.ssh.port.should == 400
     end
   end
 
@@ -412,305 +922,6 @@ VF
     it "should run the unload hook" do
       instance.should_receive(:hook).with(:environment_unload).once
       instance.unload
-    end
-  end
-
-  describe "getting a machine" do
-    # A helper to register a provider for use in tests.
-    def register_provider(name, config_class=nil, options=nil)
-      provider_cls = Class.new(Vagrant.plugin("2", :provider))
-
-      register_plugin("2") do |p|
-        p.provider(name, options) { provider_cls }
-
-        if config_class
-          p.config(name, :provider) { config_class }
-        end
-      end
-
-      provider_cls
-    end
-
-    it "should return a machine object with the correct provider" do
-      # Create a provider
-      foo_provider = register_provider("foo")
-
-      # Create the configuration
-      isolated_env = isolated_environment do |e|
-        e.vagrantfile(<<-VF)
-Vagrant.configure("2") do |config|
-  config.vm.box = "base"
-  config.vm.define "foo"
-end
-VF
-
-        e.box2("base", :foo)
-      end
-
-      # Verify that we can get the machine
-      env = isolated_env.create_vagrant_env
-      machine = env.machine(:foo, :foo)
-      machine.should be_kind_of(Vagrant::Machine)
-      machine.name.should == :foo
-      machine.provider.should be_kind_of(foo_provider)
-      machine.provider_config.should be_nil
-    end
-
-    it "should return a machine object with the machine configuration" do
-      # Create a provider
-      foo_config = Class.new(Vagrant.plugin("2", :config)) do
-        attr_accessor :value
-      end
-
-      foo_provider = register_provider("foo", foo_config)
-
-      # Create the configuration
-      isolated_env = isolated_environment do |e|
-        e.vagrantfile(<<-VF)
-Vagrant.configure("2") do |config|
-  config.vm.box = "base"
-  config.vm.define "foo"
-
-  config.vm.provider :foo do |fooconfig|
-    fooconfig.value = 100
-  end
-end
-VF
-
-        e.box2("base", :foo)
-      end
-
-      # Verify that we can get the machine
-      env = isolated_env.create_vagrant_env
-      machine = env.machine(:foo, :foo)
-      machine.should be_kind_of(Vagrant::Machine)
-      machine.name.should == :foo
-      machine.provider.should be_kind_of(foo_provider)
-      machine.provider_config.value.should == 100
-    end
-
-    it "should cache the machine objects by name and provider" do
-      # Create a provider
-      foo_provider = register_provider("foo")
-      bar_provider = register_provider("bar")
-
-      # Create the configuration
-      isolated_env = isolated_environment do |e|
-        e.vagrantfile(<<-VF)
-Vagrant.configure("2") do |config|
-  config.vm.box = "base"
-  config.vm.define "vm1"
-  config.vm.define "vm2"
-end
-VF
-
-        e.box2("base", :foo)
-        e.box2("base", :bar)
-      end
-
-      env = isolated_env.create_vagrant_env
-      vm1_foo = env.machine(:vm1, :foo)
-      vm1_bar = env.machine(:vm1, :bar)
-      vm2_foo = env.machine(:vm2, :foo)
-
-      vm1_foo.should eql(env.machine(:vm1, :foo))
-      vm1_bar.should eql(env.machine(:vm1, :bar))
-      vm1_foo.should_not eql(vm1_bar)
-      vm2_foo.should eql(env.machine(:vm2, :foo))
-    end
-
-    it "should load a machine without a box" do
-      register_provider("foo")
-
-      environment = isolated_environment do |env|
-        env.vagrantfile(<<-VF)
-Vagrant.configure("2") do |config|
-  config.vm.box = "i-dont-exist"
-end
-VF
-      end
-
-      env = environment.create_vagrant_env
-      machine = env.machine(:default, :foo)
-      machine.box.should be_nil
-    end
-
-    it "should load the machine configuration" do
-      register_provider("foo")
-
-      environment = isolated_environment do |env|
-        env.vagrantfile(<<-VF)
-Vagrant.configure("2") do |config|
-  config.ssh.port = 1
-  config.vm.box = "base"
-
-  config.vm.define "vm1" do |inner|
-    inner.ssh.port = 100
-  end
-end
-VF
-
-        env.box2("base", :foo)
-      end
-
-      env = environment.create_vagrant_env
-      machine = env.machine(:vm1, :foo)
-      machine.config.ssh.port.should == 100
-      machine.config.vm.box.should == "base"
-    end
-
-    it "should load the box configuration for a V2 box" do
-      register_provider("foo")
-
-      environment = isolated_environment do |env|
-        env.vagrantfile(<<-VF)
-Vagrant.configure("2") do |config|
-  config.vm.box = "base"
-end
-VF
-
-        env.box2("base", :foo, :vagrantfile => <<-VF)
-Vagrant.configure("2") do |config|
-  config.ssh.port = 100
-end
-VF
-      end
-
-      env = environment.create_vagrant_env
-      machine = env.machine(:default, :foo)
-      machine.config.ssh.port.should == 100
-    end
-
-    it "should load the box configuration for a V2 box and custom Vagrantfile name" do
-      register_provider("foo")
-
-      environment = isolated_environment do |env|
-        env.file("some_other_name", <<-VF)
-Vagrant.configure("2") do |config|
-  config.vm.box = "base"
-end
-VF
-
-        env.box2("base", :foo, :vagrantfile => <<-VF)
-Vagrant.configure("2") do |config|
-  config.ssh.port = 100
-end
-VF
-      end
-
-      env = with_temp_env("VAGRANT_VAGRANTFILE" => "some_other_name") do
-        environment.create_vagrant_env
-      end
-
-      machine = env.machine(:default, :foo)
-      machine.config.ssh.port.should == 100
-    end
-
-    it "should load the box configuration for other formats for a V2 box" do
-      register_provider("foo", nil, box_format: "bar")
-
-      environment = isolated_environment do |env|
-        env.vagrantfile(<<-VF)
-Vagrant.configure("2") do |config|
-  config.vm.box = "base"
-end
-VF
-
-        env.box2("base", :bar, :vagrantfile => <<-VF)
-Vagrant.configure("2") do |config|
-  config.ssh.port = 100
-end
-VF
-      end
-
-      env = environment.create_vagrant_env
-      machine = env.machine(:default, :foo)
-      machine.config.ssh.port.should == 100
-    end
-
-    it "prefer sooner formats when multiple box formats are available" do
-      register_provider("foo", nil, box_format: ["fA", "fB"])
-
-      environment = isolated_environment do |env|
-        env.vagrantfile(<<-VF)
-Vagrant.configure("2") do |config|
-  config.vm.box = "base"
-end
-VF
-
-        env.box2("base", :fA, :vagrantfile => <<-VF)
-Vagrant.configure("2") do |config|
-  config.ssh.port = 100
-end
-VF
-
-        env.box2("base", :fB, :vagrantfile => <<-VF)
-Vagrant.configure("2") do |config|
-  config.ssh.port = 200
-end
-VF
-      end
-
-      env = environment.create_vagrant_env
-      machine = env.machine(:default, :foo)
-      machine.config.ssh.port.should == 100
-    end
-
-    it "should load the provider override if set" do
-      register_provider("bar")
-      register_provider("foo")
-
-      isolated_env = isolated_environment do |e|
-        e.vagrantfile(<<-VF)
-Vagrant.configure("2") do |config|
-  config.vm.box = "foo"
-
-  config.vm.provider :foo do |_, c|
-    c.vm.box = "bar"
-  end
-end
-VF
-      end
-
-      env = isolated_env.create_vagrant_env
-      foo_vm = env.machine(:default, :foo)
-      bar_vm = env.machine(:default, :bar)
-      foo_vm.config.vm.box.should == "bar"
-      bar_vm.config.vm.box.should == "foo"
-    end
-
-    it "should reload the cache if refresh is set" do
-      # Create a provider
-      foo_provider = register_provider("foo")
-
-      # Create the configuration
-      isolated_env = isolated_environment do |e|
-        e.vagrantfile(<<-VF)
-Vagrant.configure("2") do |config|
-  config.vm.box = "base"
-end
-VF
-
-        e.box2("base", :foo)
-      end
-
-      env = isolated_env.create_vagrant_env
-      vm1 = env.machine(:default, :foo)
-      vm2 = env.machine(:default, :foo, true)
-      vm3 = env.machine(:default, :foo)
-
-      vm1.should_not eql(vm2)
-      vm2.should eql(vm3)
-    end
-
-    it "should raise an error if the VM is not found" do
-      expect { instance.machine("i-definitely-dont-exist", :virtualbox) }.
-        to raise_error(Vagrant::Errors::MachineNotFound)
-    end
-
-    it "should raise an error if the provider is not found" do
-      expect { instance.machine(:default, :lol_no) }.
-        to raise_error(Vagrant::Errors::ProviderNotFound)
     end
   end
 

@@ -105,12 +105,17 @@ module VagrantPlugins
 
             if adapter[:bridge]
               args.concat(["--bridgeadapter#{adapter[:adapter]}",
-                          adapter[:bridge]])
+                          adapter[:bridge], "--cableconnected#{adapter[:adapter]}", "on"])
             end
 
             if adapter[:hostonly]
               args.concat(["--hostonlyadapter#{adapter[:adapter]}",
                           adapter[:hostonly]])
+            end
+
+            if adapter[:intnet]
+              args.concat(["--intnet#{adapter[:adapter]}",
+                          adapter[:intnet]])
             end
 
             if adapter[:mac_address]
@@ -127,7 +132,7 @@ module VagrantPlugins
         end
 
         def execute_command(command)
-          raw(*command)
+          execute(*command)
         end
 
         def export(path)
@@ -162,7 +167,29 @@ module VagrantPlugins
           output = ""
           total = ""
           last  = 0
-          execute("import", ovf) do |type, data|
+
+          output = execute("import", "-n", ovf)
+          output =~ /Suggested VM name "(.+?)"/
+          suggested_name = $1.to_s
+          specified_name = "#{suggested_name}_#{(Time.now.to_f * 1000.0).to_i}_#{rand(100000)}" #Millisecond + Random
+
+          #Build the specified name param list
+          name_params = Array.new
+          name_params << "--vsys" << "0" << "--vmname" << specified_name
+
+          #Extract the disks list and build the disk target params
+          disk_params = Array.new
+          disks = output.scan(/(\d+): Hard disk image: source image=.+, target path=(.+),/)
+          disks.each do |unit_num, path|
+             disk_params << "--vsys"
+              disk_params << "0"  #Derive vsys num .. do we support OVF's with multiple machines?
+              disk_params << "--unit"
+              disk_params << unit_num
+              disk_params << "--disk"
+              disk_params << path.sub("/#{suggested_name}/", "/#{specified_name}/")
+          end
+
+          execute("import", ovf , *name_params, *disk_params) do |type, data|
             if type == :stdout
               # Keep track of the stdout so that we can get the VM name
               output << data
@@ -186,16 +213,9 @@ module VagrantPlugins
             end
           end
 
-          # Find the name of the VM name
-          if output !~ /Suggested VM name "(.+?)"/
-            @logger.error("Couldn't find VM name in the output.")
-            return nil
-          end
-
-          name = $1.to_s
-
           output = execute("list", "vms")
-          if output =~ /^"#{Regexp.escape(name)}" \{(.+?)\}$/
+
+          if output =~ /^"#{Regexp.escape(specified_name)}" \{(.+?)\}$/
             return $1.to_s
           end
 
@@ -276,6 +296,19 @@ module VagrantPlugins
           end
 
           return nil
+        end
+
+        def read_guest_ip(adapter_number)
+          read_guest_property("/VirtualBox/GuestInfo/Net/#{adapter_number}/V4/IP")
+        end
+
+        def read_guest_property(property)
+          output = execute("guestproperty", "get", @uuid, property)
+          if output =~ /^Value: (.+?)$/
+            $1.to_s
+          else
+            raise Vagrant::Errors::VirtualBoxGuestPropertyNotFound, :guest_property => property
+          end
         end
 
         def read_host_only_interfaces
@@ -491,7 +524,23 @@ module VagrantPlugins
         end
 
         def vm_exists?(uuid)
-          raw("showvminfo", uuid).exit_code == 0
+          5.times do |i|
+            result = raw("showvminfo", uuid)
+            return true if result.exit_code == 0
+
+            # GH-2479: Sometimes this happens. In this case, retry. If
+            # we don't see this text, the VM really probably doesn't exist.
+            return false if !result.stderr.include?("CO_E_SERVER_EXEC_FAILURE")
+
+            # Sleep a bit though to give VirtualBox time to fix itself
+            sleep 2
+          end
+
+          # If we reach this point, it means that we consistently got the
+          # failure, do a standard vboxmanage now. This will raise an
+          # exception if it fails again.
+          execute("showvminfo", uuid)
+          return true
         end
       end
     end

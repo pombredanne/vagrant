@@ -24,15 +24,16 @@ is required:
   remote machine. See the [inline scripts](#inline-scripts) section below
   for more information.
 
-* `path` (string) - Path to a shell script to upload and execute, relative
-  to the project Vagrantfile.
+* `path` (string) - Path to a shell script to upload and execute. It can be a
+  script relative to the project Vagrantfile or a remote script (like a [gist](http://gist.github.com)).
 
 The remainder of the available options are optional:
 
-* `args` (string) - Arguments to pass to the shell script when executing it
+* `args` (string or array) - Arguments to pass to the shell script when executing it
   as a single string. These arguments must be written as if they were typed
   directly on the command line, so be sure to escape characters, quote,
-  etc. as needed.
+  etc. as needed. You may also pass the arguments in using an array. In this
+  case, Vagrant will handle quoting for you.
 
 * `binary` (boolean) - Vagrant automatically replaces Windows line endings with
   Unix line endings. If this is true, then Vagrant will not do this. By default
@@ -44,6 +45,11 @@ The remainder of the available options are optional:
 * `upload_path` (string) - Is the remote path where the shell script will
   be uploaded to. The script is uploaded as the SSH user over SCP, so this
   location must be writable to that user. By default this is "/tmp/vagrant-shell"
+
+* `keep_color` (boolean) - Vagrant automatically colors output in green and
+  red depending on whether the output is from stdout or stderr. If this is
+  true, Vagrant will not do this, allowing the native colors from the script
+  to be outputted.
 
 <a name="inline-scripts"></a>
 ## Inline Scripts
@@ -102,6 +108,15 @@ Relative paths, such as above, are expanded relative to the location
 of the root Vagrantfile for your project. Absolute paths can also be used,
 as well as shortcuts such as `~` (home directory) and `..` (parent directory).
 
+If you use a remote script as part of your provisioning process, you can pass in
+its URL as the `path` argument as well:
+
+```ruby
+Vagrant.configure("2") do |config|
+  config.vm.provision "shell", path: "https://example.com/provisioner.sh"
+end
+```
+
 ## Script Arguments
 
 You can parameterize your scripts as well like any normal shell script.
@@ -114,6 +129,18 @@ Vagrant.configure("2") do |config|
   config.vm.provision "shell" do |s|
     s.inline = "echo $1"
     s.args   = "'hello, world!'"
+  end
+end
+```
+
+You can also specify arguments an array if you don't want to worry about
+quoting:
+
+```ruby
+Vagrant.configure("2") do |config|
+  config.vm.provision "shell" do |s|
+    s.inline = "echo $1"
+    s.args   = ["hello, world!"]
   end
 end
 ```

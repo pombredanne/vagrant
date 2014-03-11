@@ -30,11 +30,11 @@ module Vagrant
 
         # This returns all the registered commands.
         #
-        # @return [Hash]
+        # @return [Registry<Symbol, Array<Proc, Hash>>]
         def commands
           Registry.new.tap do |result|
             @registered.each do |plugin|
-              result.merge!(plugin.command)
+              result.merge!(plugin.components.commands)
             end
           end
         end
@@ -87,15 +87,30 @@ module Vagrant
           results
         end
 
-        # This returns all registered host classes.
+        # This returns all the registered guests.
         #
         # @return [Hash]
         def hosts
           Registry.new.tap do |result|
             @registered.each do |plugin|
-              result.merge!(plugin.host)
+              result.merge!(plugin.components.hosts)
             end
           end
+        end
+
+        # This returns all the registered host capabilities.
+        #
+        # @return [Hash]
+        def host_capabilities
+          results = Hash.new { |h, k| h[k] = Registry.new }
+
+          @registered.each do |plugin|
+            plugin.components.host_capabilities.each do |host, caps|
+              results[host].merge!(caps)
+            end
+          end
+
+          results
         end
 
         # This returns all registered providers.
@@ -107,6 +122,21 @@ module Vagrant
               result.merge!(plugin.components.providers)
             end
           end
+        end
+
+        # This returns all the registered provider capabilities.
+        #
+        # @return [Hash]
+        def provider_capabilities
+          results = Hash.new { |h, k| h[k] = Registry.new }
+
+          @registered.each do |plugin|
+            plugin.components.provider_capabilities.each do |provider, caps|
+              results[provider].merge!(caps)
+            end
+          end
+
+          results
         end
 
         # This returns all the config classes for the various providers.
@@ -138,6 +168,17 @@ module Vagrant
           Registry.new.tap do |result|
             @registered.each do |plugin|
               result.merge!(plugin.provisioner)
+            end
+          end
+        end
+
+        # This returns all synced folder implementations.
+        #
+        # @return [Registry]
+        def synced_folders
+          Registry.new.tap do |result|
+            @registered.each do |plugin|
+              result.merge!(plugin.components.synced_folders)
             end
           end
         end

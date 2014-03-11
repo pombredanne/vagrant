@@ -1,5 +1,9 @@
 require "log4r"
 
+require "vagrant/util/platform"
+require "vagrant/util/ssh"
+require "vagrant/util/shell_quote"
+
 module Vagrant
   module Action
     module Builtin
@@ -7,32 +11,50 @@ module Vagrant
       # mirror the output to the UI. The resulting exit status of the command
       # will exist in the `:ssh_run_exit_status` key in the environment.
       class SSHRun
+        # For quick access to the `SSH` class.
+        include Vagrant::Util
+
         def initialize(app, env)
           @app    = app
           @logger = Log4r::Logger.new("vagrant::action::builtin::ssh_run")
         end
 
         def call(env)
-          command = env[:ssh_run_command]
+          # Grab the SSH info from the machine
+          info = env[:machine].ssh_info
 
-          @logger.debug("Executing command: #{command}")
-          exit_status = 0
-          exit_status = env[:machine].communicate.execute(command, :error_check => false) do |type, data|
-            # Determine the proper channel to send the output onto depending
-            # on the type of data we are receiving.
-            channel = type == :stdout ? :out : :error
+          # If the result is nil, then the machine is telling us that it is
+          # not yet ready for SSH, so we raise this exception.
+          raise Errors::SSHNotReady if info.nil?
 
-            # Print the output as it comes in, but don't prefix it and don't
-            # force a new line so that the output is properly preserved however
-            # it may be formatted.
-            env[:ui].info(data.to_s,
-                          :prefix => false,
-                          :new_line => false,
-                          :channel => channel)
+          info[:private_key_path] ||= []
+
+          # Check SSH key permissions
+          info[:private_key_path].each do |path|
+            SSH.check_key_permissions(Pathname.new(path))
           end
 
-          # Set the exit status on a known environmental variable
-          env[:ssh_run_exit_status] = exit_status
+          if info[:private_key_path].empty?
+            raise Errors::SSHRunRequiresKeys
+          end
+
+          # Get the command and wrap it in a login shell
+          command = ShellQuote.escape(env[:ssh_run_command], "'")
+          command = "#{env[:machine].config.ssh.shell} -c '#{command}'"
+
+          # Execute!
+          opts = env[:ssh_opts] || {}
+          opts[:extra_args] ||= []
+
+          # Allow the user to specify a tty or non-tty manually, but if they
+          # don't then we default to a TTY
+          if !opts[:extra_args].include?("-t") && !opts[:extra_args].include?("-T")
+            opts[:extra_args] << "-t"
+          end
+
+          opts[:extra_args] << command
+          opts[:subprocess] = true
+          env[:ssh_run_exit_status] = Util::SSH.exec(info, opts)
 
           # Call the next middleware
           @app.call(env)

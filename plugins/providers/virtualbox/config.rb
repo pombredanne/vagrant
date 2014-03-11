@@ -8,6 +8,12 @@ module VagrantPlugins
       # @return [Boolean]
       attr_accessor :auto_nat_dns_proxy
 
+      # If true, will check if guest additions are installed and up to
+      # date. By default, this is true.
+      #
+      # @return [Boolean]
+      attr_accessor :check_guest_additions
+
       # An array of customizations to make on the VM prior to booting it.
       #
       # @return [Array]
@@ -39,6 +45,7 @@ module VagrantPlugins
 
       def initialize
         @auto_nat_dns_proxy = UNSET_VALUE
+        @check_guest_additions = UNSET_VALUE
         @customizations   = []
         @destroy_unused_network_interfaces = UNSET_VALUE
         @name             = UNSET_VALUE
@@ -72,8 +79,24 @@ module VagrantPlugins
       #
       # @param [Integer] slot The slot for this network adapter.
       # @param [Symbol] type The type of adapter.
-      def network_adapter(slot, type, *args)
-        @network_adapters[slot] = [type, args]
+      def network_adapter(slot, type, **opts)
+        @network_adapters[slot] = [type, opts]
+      end
+
+      # Shortcut for setting memory size for the virtual machine.
+      # Calls #customize internally.
+      #
+      # @param size [Integer, String] the memory size in MB
+      def memory=(size)
+        customize("pre-boot", ["modifyvm", :id, "--memory", size.to_s])
+      end
+
+      # Shortcut for setting CPU count for the virtual machine.
+      # Calls #customize internally.
+      #
+      # @param count [Integer, String] the count of CPUs
+      def cpus=(count)
+        customize("pre-boot", ["modifyvm", :id, "--cpus", count.to_i])
       end
 
       # This is the hook that is called to finalize the object before it
@@ -81,6 +104,10 @@ module VagrantPlugins
       def finalize!
         # Default is to auto the DNS proxy
         @auto_nat_dns_proxy = true if @auto_nat_dns_proxy == UNSET_VALUE
+
+        if @check_guest_additions == UNSET_VALUE
+          @check_guest_additions = true
+        end
 
         if @destroy_unused_network_interfaces == UNSET_VALUE
           @destroy_unused_network_interfaces = false
@@ -94,7 +121,7 @@ module VagrantPlugins
       end
 
       def validate(machine)
-        errors = []
+        errors = _detected_errors
 
         valid_events = ["pre-import", "pre-boot", "post-boot"]
         @customizations.each do |event, _|
@@ -109,6 +136,14 @@ module VagrantPlugins
         @customizations.each do |event, command|
           if event == "pre-import" && command.index(:id)
             errors << I18n.t("vagrant.virtualbox.config.id_in_pre_import")
+          end
+        end
+
+        # Verify that internal networks are only on private networks.
+        machine.config.vm.networks.each do |type, data|
+          if data[:virtualbox__intnet] && type != :private_network
+            errors << I18n.t("vagrant.virtualbox.config.intnet_on_bad_type")
+            break
           end
         end
 

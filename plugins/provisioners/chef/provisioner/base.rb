@@ -1,6 +1,5 @@
 require 'tempfile'
 
-require "vagrant/util/counter"
 require "vagrant/util/template_renderer"
 
 module VagrantPlugins
@@ -12,14 +11,6 @@ module VagrantPlugins
       class Base < Vagrant.plugin("2", :provisioner)
         class ChefError < Vagrant::Errors::VagrantError
           error_namespace("vagrant.provisioners.chef")
-        end
-
-        include Vagrant::Util::Counter
-
-        def initialize(machine, config)
-          super
-
-          config.provisioning_path ||= "/tmp/vagrant-chef-#{get_and_update_counter(:provisioning_path)}"
         end
 
         def verify_binary(binary)
@@ -40,9 +31,15 @@ module VagrantPlugins
         end
 
         def chown_provisioning_folder
+          paths = [@config.provisioning_path,
+                   @config.file_backup_path,
+                   @config.file_cache_path]
+
           @machine.communicate.tap do |comm|
-            comm.sudo("mkdir -p #{@config.provisioning_path}")
-            comm.sudo("chown #{@machine.ssh_info[:username]} #{@config.provisioning_path}")
+            paths.each do |path|
+              comm.sudo("mkdir -p #{path}")
+              comm.sudo("chown -h #{@machine.ssh_info[:username]} #{path}")
+            end
           end
         end
 
@@ -60,9 +57,12 @@ module VagrantPlugins
 
           config_file = Vagrant::Util::TemplateRenderer.render(template, {
             :custom_configuration => remote_custom_config_path,
-            :file_cache_path => @config.file_cache_path,
+            :encrypted_data_bag_secret => guest_encrypted_data_bag_secret_key_path,
+            :environment      => @config.environment,
+            :file_cache_path  => @config.file_cache_path,
             :file_backup_path => @config.file_backup_path,
             :log_level        => @config.log_level.to_sym,
+            :node_name        => @config.node_name,
             :verbose_logging  => @config.verbose_logging,
             :http_proxy       => @config.http_proxy,
             :http_proxy_user  => @config.http_proxy_user,
@@ -82,7 +82,7 @@ module VagrantPlugins
 
           remote_file = File.join(config.provisioning_path, filename)
           @machine.communicate.tap do |comm|
-            comm.sudo("rm #{remote_file}", :error_check => false)
+            comm.sudo("rm -f #{remote_file}", :error_check => false)
             comm.upload(temp.path, remote_file)
           end
         end
@@ -103,8 +103,39 @@ module VagrantPlugins
 
           remote_file = File.join(@config.provisioning_path, "dna.json")
           @machine.communicate.tap do |comm|
-            comm.sudo("rm #{remote_file}", :error_check => false)
+            comm.sudo("rm -f #{remote_file}", :error_check => false)
             comm.upload(temp.path, remote_file)
+          end
+        end
+
+        def upload_encrypted_data_bag_secret
+          remote_file = guest_encrypted_data_bag_secret_key_path
+          return if !remote_file
+
+          @machine.env.ui.info I18n.t(
+            "vagrant.provisioners.chef.upload_encrypted_data_bag_secret_key")
+
+          @machine.communicate.tap do |comm|
+            comm.sudo("rm -f #{remote_file}", error_check: false)
+            comm.upload(encrypted_data_bag_secret_key_path, remote_file)
+          end
+        end
+
+        def delete_encrypted_data_bag_secret
+          remote_file = guest_encrypted_data_bag_secret_key_path
+          if remote_file
+            @machine.communicate.sudo("rm -f #{remote_file}", error_check: false)
+          end
+        end
+
+        def encrypted_data_bag_secret_key_path
+          File.expand_path(@config.encrypted_data_bag_secret_key_path,
+            @machine.env.root_path)
+        end
+
+        def guest_encrypted_data_bag_secret_key_path
+          if @config.encrypted_data_bag_secret_key_path
+            File.join(@config.provisioning_path, "encrypted_data_bag_secret_key")
           end
         end
       end

@@ -21,12 +21,17 @@ module VagrantPlugins
           networks.each do |network|
             interfaces.add(network[:interface])
 
+            # Down the interface before munging the config file. This might fail
+            # if the interface is not actually set up yet so ignore errors.
+            machine.communicate.sudo(
+              "/sbin/ifdown eth#{network[:interface]} 2> /dev/null", error_check: false)
+
             # Remove any previous vagrant configuration in this network interface's
             # configuration files.
             machine.communicate.sudo("touch #{network_scripts_dir}/ifcfg-eth#{network[:interface]}")
             machine.communicate.sudo("sed -e '/^#VAGRANT-BEGIN/,/^#VAGRANT-END/ d' #{network_scripts_dir}/ifcfg-eth#{network[:interface]} > /tmp/vagrant-ifcfg-eth#{network[:interface]}")
             machine.communicate.sudo("cat /tmp/vagrant-ifcfg-eth#{network[:interface]} > #{network_scripts_dir}/ifcfg-eth#{network[:interface]}")
-            machine.communicate.sudo("rm /tmp/vagrant-ifcfg-eth#{network[:interface]}")
+            machine.communicate.sudo("rm -f /tmp/vagrant-ifcfg-eth#{network[:interface]}")
 
             # Render and upload the network entry file to a deterministic
             # temporary location.
@@ -46,12 +51,17 @@ module VagrantPlugins
           # SSH never dies.
           interfaces.each do |interface|
             retryable(:on => Vagrant::Errors::VagrantError, :tries => 3, :sleep => 2) do
-              machine.communicate.sudo("/sbin/ifdown eth#{interface} 2> /dev/null", :error_check => false)
+              # The interface should already be down so this probably
+              # won't do anything, so we run it with error_check false.
+              machine.communicate.sudo(
+                "/sbin/ifdown eth#{interface} 2> /dev/null", error_check: false)
+
+              # Add the new interface and bring it up
               machine.communicate.sudo("cat /tmp/vagrant-network-entry_#{interface} >> #{network_scripts_dir}/ifcfg-eth#{interface}")
               machine.communicate.sudo("ARPCHECK=no /sbin/ifup eth#{interface} 2> /dev/null")
             end
 
-            machine.communicate.sudo("rm /tmp/vagrant-network-entry_#{interface}")
+            machine.communicate.sudo("rm -f /tmp/vagrant-network-entry_#{interface}")
           end
         end
       end

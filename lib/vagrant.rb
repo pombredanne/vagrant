@@ -1,3 +1,13 @@
+require "vagrant/shared_helpers"
+
+if Vagrant.plugins_enabled? && !defined?(Bundler)
+  puts "It appears that Vagrant was not properly loaded. Specifically,"
+  puts "the bundler context Vagrant requires was not setup. Please execute"
+  puts "vagrant using only the `vagrant` executable."
+  abort
+end
+
+require 'rubygems'
 require 'log4r'
 
 # Enable logging if it is requested. We do this before
@@ -57,9 +67,20 @@ require 'openssl'
 require 'vagrant/version'
 global_logger = Log4r::Logger.new("vagrant::global")
 global_logger.info("Vagrant version: #{Vagrant::VERSION}")
+global_logger.info("Ruby version: #{RUBY_VERSION}")
+global_logger.info("RubyGems version: #{Gem::VERSION}")
+ENV.each do |k, v|
+  global_logger.info("#{k}=#{v.inspect}") if k =~ /^VAGRANT_/
+end
+global_logger.info("Plugins:")
+Bundler.definition.specs_for([:plugins]).each do |spec|
+  global_logger.info("  - #{spec.name} = #{spec.version}")
+end
+
 
 # We need these components always so instead of an autoload we
 # just require them explicitly here.
+require "vagrant/plugin"
 require "vagrant/registry"
 
 module Vagrant
@@ -74,7 +95,7 @@ module Vagrant
   autoload :Environment,   'vagrant/environment'
   autoload :Errors,        'vagrant/errors'
   autoload :Guest,         'vagrant/guest'
-  autoload :Hosts,         'vagrant/hosts'
+  autoload :Host,          'vagrant/host'
   autoload :Machine,       'vagrant/machine'
   autoload :MachineState,  'vagrant/machine_state'
   autoload :Plugin,        'vagrant/plugin'
@@ -101,20 +122,7 @@ module Vagrant
     c.register([:"2", :host])         { Plugin::V2::Host }
     c.register([:"2", :provider])     { Plugin::V2::Provider }
     c.register([:"2", :provisioner])  { Plugin::V2::Provisioner }
-  end
-
-  # This returns a true/false showing whether we're running from the
-  # environment setup by the Vagrant installers.
-  #
-  # @return [Boolean]
-  def self.in_installer?
-    !!ENV["VAGRANT_INSTALLER_ENV"]
-  end
-
-  # The source root is the path to the root directory of
-  # the Vagrant gem.
-  def self.source_root
-    @source_root ||= Pathname.new(File.expand_path('../../', __FILE__))
+    c.register([:"2", :synced_folder]) { Plugin::V2::SyncedFolder }
   end
 
   # Configure a Vagrant environment. The version specifies the version
@@ -133,7 +141,12 @@ module Vagrant
   # be used from the Vagrantfile to easily branch based on plugin
   # availability.
   def self.has_plugin?(name)
-    plugin("2").manager.registered.any? { |plugin| plugin.name == name }
+    # We check the plugin names first because those are cheaper to check
+    return true if plugin("2").manager.registered.any? { |p| p.name == name }
+
+    # Now check the plugin gem names
+    require "vagrant/plugin/manager"
+    Plugin::Manager.instance.installed_specs.any? { |s| s.name == name }
   end
 
   # Returns a superclass to use when creating a plugin for Vagrant.
@@ -168,71 +181,49 @@ module Vagrant
       "#{version} #{component}"
   end
 
-  # This should be used instead of Ruby's built-in `require` in order to
-  # load a Vagrant plugin. This will load the given plugin by first doing
-  # a normal `require`, giving a nice error message if things go wrong,
-  # and second by verifying that a Vagrant plugin was actually defined in
-  # the process.
-  #
-  # @param [String] name Name of the plugin to load.
+  # @deprecated
   def self.require_plugin(name)
-    if ENV["VAGRANT_NO_PLUGINS"]
-      logger = Log4r::Logger.new("vagrant::root")
-      logger.warn("VAGRANT_NO_PLUGINS is set, not loading 3rd party plugin: #{name}")
+    puts "Vagrant.require_plugin is deprecated and has no effect any longer."
+    puts "Use `vagrant plugin` commands to manage plugins. This warning will"
+    puts "be removed in the next version of Vagrant."
+  end
+
+  # This allows a Vagrantfile to specify the version of Vagrant that is
+  # required. You can specify a list of requirements which will all be checked
+  # against the running Vagrant version.
+  #
+  # This should be specified at the _top_ of any Vagrantfile.
+  #
+  # Examples are shown below:
+  #
+  #   Vagrant.require_version(">= 1.3.5")
+  #   Vagrant.require_version(">= 1.3.5", "< 1.4.0")
+  #   Vagrant.require_version("~> 1.3.5")
+  #
+  def self.require_version(*requirements)
+    logger = Log4r::Logger.new("vagrant::root")
+    logger.info("Version requirements from Vagrantfile: #{requirements.inspect}")
+
+    req = Gem::Requirement.new(*requirements)
+    if req.satisfied_by?(Gem::Version.new(VERSION))
+      logger.info("  - Version requirements satisfied!")
       return
     end
 
-    # Redirect stdout/stderr so that we can output it in our own way.
-    previous_stderr = $stderr
-    previous_stdout = $stdout
-    $stderr = StringIO.new
-    $stdout = StringIO.new
-
-    # Attempt the normal require
-    begin
-      require name
-    rescue Exception => e
-      # Since this is a rare case, we create a one-time logger here
-      # in order to output the error
-      logger = Log4r::Logger.new("vagrant::root")
-      logger.error("Failed to load plugin: #{name}")
-      logger.error(" -- Error: #{e.inspect}")
-      logger.error(" -- Backtrace:")
-      logger.error(e.backtrace.join("\n"))
-
-      # If it is a LoadError we first try to see if it failed loading
-      # the top-level entrypoint. If so, then we report a different error.
-      if e.is_a?(LoadError)
-        # Parse the message in order to get what failed to load, and
-        # add some extra protection around if the message is different.
-        parts = e.to_s.split(" -- ", 2)
-        if parts.length == 2 && parts[1] == name
-          raise Errors::PluginLoadError, :plugin => name
-        end
-      end
-
-      # Get the string data out from the stdout/stderr captures
-      stderr = $stderr.string
-      stdout = $stdout.string
-      if !stderr.empty? || !stdout.empty?
-        raise Errors::PluginLoadFailedWithOutput,
-          :plugin => name,
-          :stderr => stderr,
-          :stdout => stdout
-      end
-
-      # And raise an error itself
-      raise Errors::PluginLoadFailed,
-        :plugin => name
-    end
-  ensure
-    $stderr = previous_stderr if previous_stderr
-    $stdout = previous_stdout if previous_stdout
+    raise Errors::VagrantVersionBad,
+      requirements: requirements.join(", "),
+      version: VERSION
   end
 end
 
 # Default I18n to load the en locale
 I18n.load_path << File.expand_path("templates/locales/en.yml", Vagrant.source_root)
+
+if I18n.config.respond_to?(:enforce_available_locales=)
+  # Make sure only available locales are used. This will be the default in the
+  # future but we need this to silence a deprecation warning from 0.6.9
+  I18n.config.enforce_available_locales = true
+end
 
 # A lambda that knows how to load plugins from a single directory.
 plugin_load_proc = lambda do |directory|
@@ -262,4 +253,14 @@ Vagrant.source_root.join("plugins").children(true).each do |directory|
 
   # Otherwise, attempt to load from sub-directories
   directory.children(true).each(&plugin_load_proc)
+end
+
+# If we have plugins enabled, then load those
+if Vagrant.plugins_enabled?
+  begin
+    global_logger.info("Loading plugins!")
+    Bundler.require(:plugins)
+  rescue Exception => e
+    raise Vagrant::Errors::PluginLoadError, message: e.to_s
+  end
 end

@@ -41,9 +41,9 @@ describe Vagrant::Config::V2::Root do
     }
   end
 
-  describe "finalization" do
-    it "should finalize un-used keys" do
-      foo_class = Class.new do
+  describe "#finalize!" do
+    it "should call #finalize!" do
+      foo_class = Class.new(Vagrant.plugin("2", "config")) do
         attr_accessor :foo
 
         def finalize!
@@ -56,6 +56,17 @@ describe Vagrant::Config::V2::Root do
       instance.finalize!
 
       instance.foo.foo.should == "SET"
+    end
+
+    it "should call #_finalize!" do
+      klass = Class.new(Vagrant.plugin("2", "config"))
+
+      klass.any_instance.should_receive(:finalize!)
+      klass.any_instance.should_receive(:_finalize!)
+
+      map = { foo: klass }
+      instance = described_class.new(map)
+      instance.finalize!
     end
   end
 

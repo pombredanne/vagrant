@@ -107,7 +107,7 @@ module VagrantPlugins
 
             if adapter[:bridge]
               args.concat(["--bridgeadapter#{adapter[:adapter]}",
-                          adapter[:bridge]])
+                          adapter[:bridge], "--cableconnected#{adapter[:adapter]}", "on"])
             end
 
             if adapter[:hostonly]
@@ -129,7 +129,7 @@ module VagrantPlugins
         end
 
         def execute_command(command)
-          raw(*command)
+          execute(*command)
         end
 
         def export(path)
@@ -267,6 +267,19 @@ module VagrantPlugins
           end
 
           return nil
+        end
+
+        def read_guest_ip(adapter_number)
+          read_guest_property("/VirtualBox/GuestInfo/Net/#{adapter_number}/V4/IP")
+        end
+
+        def read_guest_property(property)
+          output = execute("guestproperty", "get", @uuid, property)
+          if output =~ /^Value: (.+?)$/
+            $1.to_s
+          else
+            raise Vagrant::Errors::VirtualBoxGuestPropertyNotFound, :guest_property => property
+          end
         end
 
         def read_host_only_interfaces

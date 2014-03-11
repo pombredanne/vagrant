@@ -108,6 +108,11 @@ module VagrantPlugins
 
         # Execute a raw command straight through to VBoxManage.
         #
+        # Accepts a :retryable => true option if the command should be retried
+        # upon failure.
+        #
+        # Raises a VBoxManage error if it fails.
+        #
         # @param [Array] command Command to execute.
         def execute_command(command)
         end
@@ -178,6 +183,14 @@ module VagrantPlugins
         #
         # @return [String]
         def read_guest_additions_version
+        end
+
+        # Returns the value of a guest property on the current VM.
+        #
+        # @param  [String] property the name of the guest property to read
+        # @return [String] value of the guest property
+        # @raise  [VirtualBoxGuestPropertyNotFound] if the guest property does not have a value
+        def read_guest_property(property)
         end
 
         # Returns a list of available host only interfaces.
@@ -284,10 +297,10 @@ module VagrantPlugins
           # Variable to store our execution result
           r = nil
 
-          # If there is an error with VBoxManage, this gets set to true
-          errored = false
-
           retryable(:on => Vagrant::Errors::VBoxManageError, :tries => tries, :sleep => 1) do
+            # If there is an error with VBoxManage, this gets set to true
+            errored = false
+
             # Execute the command
             r = raw(*command, &block)
 
@@ -322,14 +335,14 @@ module VagrantPlugins
                 errored = true
               end
             end
-          end
 
-          # If there was an error running VBoxManage, show the error and the
-          # output.
-          if errored
-            raise Vagrant::Errors::VBoxManageError,
-              :command => command.inspect,
-              :stderr  => r.stderr
+            # If there was an error running VBoxManage, show the error and the
+            # output.
+            if errored
+              raise Vagrant::Errors::VBoxManageError,
+                :command => command.inspect,
+                :stderr  => r.stderr
+            end
           end
 
           # Return the output, making sure to replace any Windows-style
@@ -341,7 +354,10 @@ module VagrantPlugins
         def raw(*command, &block)
           int_callback = lambda do
             @interrupted = true
-            @logger.info("Interrupted.")
+
+            # We have to execute this in a thread due to trap contexts
+            # and locks.
+            Thread.new { @logger.info("Interrupted.") }.join
           end
 
           # Append in the options for subprocess

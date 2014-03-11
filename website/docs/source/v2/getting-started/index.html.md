@@ -21,10 +21,20 @@ Before diving into your first project, please [install Vagrant](/v2/installation
 And because we'll be using [VirtualBox](http://www.virtualbox.org) as our
 provider for the getting started guide, please install that as well.
 
+<div class="alert alert-block alert-info">
+<p>
+<strong>More of a book person?</strong> If you prefer to read a physical
+book, you may be interested in
+<a href="http://www.amazon.com/gp/product/1449335837/ref=as_li_qf_sp_asin_il_tl?ie=UTF8&camp=1789&creative=9325&creativeASIN=1449335837&linkCode=as2&tag=vagrant-20">
+Vagrant: Up and Running
+</a>, written by the author of Vagrant and published by O'Reilly.
+</p>
+</div>
+
 ## Up and Running
 
 ```
-$ vagrant init precise32 http://files.vagrantup.com/precise32.box
+$ vagrant init hashicorp/precise32
 $ vagrant up
 ```
 
@@ -38,7 +48,7 @@ Now imagine every project you've ever worked on being this easy to
 set up.
 
 With Vagrant, `vagrant up` is all you need to work on any project,
-to install every dependency that project needs, and to setup any
+to install every dependency that project needs, and to set up any
 networking and synced folders so you can continue working from the
 comfort of your own machine.
 

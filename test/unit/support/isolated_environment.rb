@@ -1,6 +1,7 @@
 require "fileutils"
 require "pathname"
 require "tempfile"
+require "tmpdir"
 
 require "json"
 require "log4r"
@@ -9,7 +10,6 @@ require "vagrant/util/platform"
 require "vagrant/util/subprocess"
 
 require "support/isolated_environment"
-require "support/tempdir"
 
 module Unit
   class IsolatedEnvironment < ::IsolatedEnvironment
@@ -89,13 +89,51 @@ module Unit
       box_dir
     end
 
+    # Creates a fake box to exist in this environment according
+    # to the "gen-3" box format.
+    #
+    # @param [String] name
+    # @param [String] version
+    # @param [String] provider
+    # @return [Pathname]
+    def box3(name, version, provider, **opts)
+      # Create the directory for the box
+      box_dir = boxes_dir.join(name, version, provider.to_s)
+      box_dir.mkpath
+
+      # Create the metadata.json for it
+      box_metadata_file = box_dir.join("metadata.json")
+      box_metadata_file.open("w") do |f|
+        f.write(JSON.generate({
+          :provider => provider.to_s
+        }))
+      end
+
+      # Create a Vagrantfile
+      if opts[:vagrantfile]
+        box_vagrantfile = box_dir.join("Vagrantfile")
+        box_vagrantfile.open("w") do |f|
+          f.write(opts[:vagrantfile])
+        end
+      end
+
+      # Create the metadata URL
+      if opts[:metadata_url]
+        boxes_dir.join(name, "metadata_url").open("w") do |f|
+          f.write(opts[:metadata_url])
+        end
+      end
+
+      box_dir
+    end
+
     # This creates a "box" file that is a valid V1 box.
     #
     # @return [Pathname] Path to the newly created box.
     def box1_file
       # Create a temporary directory to store our data we will tar up
-      td_source = Tempdir.new
-      td_dest   = Tempdir.new
+      td_source = Dir.mktmpdir
+      td_dest   = Dir.mktmpdir
 
       # Store the temporary directory so it is not deleted until
       # this instance is garbage collected.
@@ -103,10 +141,10 @@ module Unit
       @_box2_file_temp << td_dest
 
       # The source as a Pathname, which is easier to work with
-      source = Pathname.new(td_source.path)
+      source = Pathname.new(td_source)
 
       # The destination file
-      result = Pathname.new(td_dest.path).join("temporary.box")
+      result = Pathname.new(td_dest).join("temporary.box")
 
       # Put a "box.ovf" in there.
       source.join("box.ovf").open("w") do |f|
@@ -139,8 +177,8 @@ module Unit
       }.merge(options[:metadata] || {})
 
       # Create a temporary directory to store our data we will tar up
-      td_source = Tempdir.new
-      td_dest   = Tempdir.new
+      td_source = Dir.mktmpdir
+      td_dest   = Dir.mktmpdir
 
       # Store the temporary directory so it is not deleted until
       # this instance is garbage collected.
@@ -148,10 +186,10 @@ module Unit
       @_box2_file_temp << td_dest
 
       # The source as a Pathname, which is easier to work with
-      source = Pathname.new(td_source.path)
+      source = Pathname.new(td_source)
 
       # The destination file
-      result = Pathname.new(td_dest.path).join("temporary.box")
+      result = Pathname.new(td_dest).join("temporary.box")
 
       # Put the metadata.json in here.
       source.join("metadata.json").open("w") do |f|

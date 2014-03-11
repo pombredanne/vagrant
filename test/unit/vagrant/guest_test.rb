@@ -3,7 +3,7 @@ require "pathname"
 require File.expand_path("../../base", __FILE__)
 
 describe Vagrant::Guest do
-  include_context "unit"
+  include_context "capability_helpers"
 
   let(:capabilities) { {} }
   let(:guests)  { {} }
@@ -18,153 +18,76 @@ describe Vagrant::Guest do
 
   subject { described_class.new(machine, guests, capabilities) }
 
-  # This registers a capability with a specific guest
-  def register_capability(guest, capability, options=nil)
-    options ||= {}
-
-    cap = Class.new do
-      if !options[:corrupt]
-        define_method(capability) do |*args|
-          raise "cap: #{capability} #{args.inspect}"
-        end
-      end
-    end
-
-    capabilities[guest] ||= {}
-    capabilities[guest][capability] = cap.new
-  end
-
-  # This registers a guest with the class.
-  #
-  # @param [Symbol] name Name of the guest
-  # @param [Symbol] parent Name of the parent
-  # @param [Boolean] detect Whether or not to detect properly
-  def register_guest(name, parent, detect)
-    guest = Class.new(Vagrant.plugin("2", "guest")) do
-      define_method(:name) do
-        name
-      end
-
-      define_method(:detect?) do |m|
-        detect
-      end
-    end
-
-    guests[name] = [guest, parent]
-  end
-
   describe "#capability" do
-    before :each do
-      register_guest(:foo, nil, true)
-      register_guest(:bar, :foo, true)
+    before(:each) do
+      guests[:foo] = [detect_class(true), nil]
+      capabilities[:foo] = {
+        foo_cap: cap_instance(:foo_cap),
+        corrupt_cap: cap_instance(:corrupt_cap, corrupt: true),
+      }
 
       subject.detect!
     end
 
-    it "executes the capability" do
-      register_capability(:bar, :test)
-
-      expect { subject.capability(:test) }.
-        to raise_error(RuntimeError, "cap: test [machine]")
+    it "executes existing capabilities" do
+      expect { subject.capability(:foo_cap) }.
+        to raise_error(RuntimeError, "cap: foo_cap [machine]")
     end
 
-    it "executes the capability with arguments" do
-      register_capability(:bar, :test)
-
-      expect { subject.capability(:test, 1) }.
-        to raise_error(RuntimeError, "cap: test [machine, 1]")
-    end
-
-    it "raises an exception if the capability doesn't exist" do
-      expect { subject.capability(:what_is_this_i_dont_even) }.
+    it "raises user-friendly error for non-existing caps" do
+      expect { subject.capability(:what_cap) }.
         to raise_error(Vagrant::Errors::GuestCapabilityNotFound)
     end
 
-    it "raises an exception if the method doesn't exist on the module" do
-      register_capability(:bar, :test_is_corrupt, corrupt: true)
-
-      expect { subject.capability(:test_is_corrupt) }.
+    it "raises a user-friendly error for corrupt caps" do
+      expect { subject.capability(:corrupt_cap) }.
         to raise_error(Vagrant::Errors::GuestCapabilityInvalid)
     end
   end
 
-  describe "#capability?" do
-    before :each do
-      register_guest(:foo, nil, true)
-      register_guest(:bar, :foo, true)
-
-      subject.detect!
-    end
-
-    it "doesn't have unknown capabilities" do
-      subject.capability?(:what_is_this_i_dont_even).should_not be
-    end
-
-    it "doesn't have capabilities registered to other guests" do
-      register_capability(:baz, :test)
-
-      subject.capability?(:test).should_not be
-    end
-
-    it "has capability of detected guest" do
-      register_capability(:bar, :test)
-
-      subject.capability?(:test).should be
-    end
-
-    it "has capability of parent guests" do
-      register_capability(:foo, :test)
-
-      subject.capability?(:test).should be
-    end
-  end
-
   describe "#detect!" do
-    it "detects the first match" do
-      register_guest(:foo, nil, false)
-      register_guest(:bar, nil, true)
-      register_guest(:baz, nil, false)
+    it "auto-detects if no explicit guest name given" do
+      machine.config.vm.stub(guest: nil)
+      subject.should_receive(:initialize_capabilities!).
+        with(nil, guests, capabilities, machine)
 
       subject.detect!
-      subject.name.should == :bar
-      subject.chain.length.should == 1
-      subject.chain[0][0].should == :bar
-      subject.chain[0][1].name.should == :bar
     end
 
-    it "detects those with the most parents first" do
-      register_guest(:foo, nil, true)
-      register_guest(:bar, :foo, true)
-      register_guest(:baz, :bar, true)
-      register_guest(:foo2, nil, true)
-      register_guest(:bar2, :foo2, true)
+    it "uses the explicit guest name if specified" do
+      machine.config.vm.stub(guest: :foo)
+      subject.should_receive(:initialize_capabilities!).
+        with(:foo, guests, capabilities, machine)
 
       subject.detect!
-      subject.name.should == :baz
-      subject.chain.length.should == 3
-      subject.chain.map(&:first).should == [:baz, :bar, :foo]
-      subject.chain.map { |x| x[1] }.map(&:name).should == [:baz, :bar, :foo]
     end
 
-    it "detects the forced guest setting" do
-      register_guest(:foo, nil, false)
-      register_guest(:bar, nil, false)
+    it "raises a user-friendly error if specified guest doesn't exist" do
+      machine.config.vm.stub(guest: :foo)
 
-      machine.config.vm.stub(:guest => :bar)
-
-      subject.detect!
-      subject.name.should == :bar
+      expect { subject.detect! }.
+        to raise_error(Vagrant::Errors::GuestExplicitNotDetected)
     end
 
-    it "raises an exception if no guest can be detected" do
+    it "raises a user-friendly error if auto-detected guest not found" do
       expect { subject.detect! }.
         to raise_error(Vagrant::Errors::GuestNotDetected)
     end
   end
 
+  describe "#name" do
+    it "should be the name of the detected guest" do
+      guests[:foo] = [detect_class(true), nil]
+      guests[:bar] = [detect_class(false), nil]
+
+      subject.detect!
+      expect(subject.name).to eql(:foo)
+    end
+  end
+
   describe "#ready?" do
     before(:each) do
-      register_guest(:foo, nil, true)
+      guests[:foo] = [detect_class(true), nil]
     end
 
     it "should not be ready by default" do

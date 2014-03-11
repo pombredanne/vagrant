@@ -1,4 +1,5 @@
 require "pathname"
+require "tmpdir"
 
 require File.expand_path("../../base", __FILE__)
 
@@ -6,7 +7,11 @@ describe Vagrant::Machine do
   include_context "unit"
 
   let(:name)     { "foo" }
-  let(:provider) { double("provider") }
+  let(:provider) do
+    double("provider").tap do |obj|
+      obj.stub(:_initialize => nil)
+    end
+  end
   let(:provider_cls) do
     obj = double("provider_cls")
     obj.stub(:new => provider)
@@ -16,8 +21,8 @@ describe Vagrant::Machine do
   let(:provider_name) { :test }
   let(:provider_options) { {} }
   let(:box)      { Object.new }
-  let(:config)   { env.config_global }
-  let(:data_dir) { Pathname.new(Tempdir.new.path) }
+  let(:config)   { env.vagrantfile.config }
+  let(:data_dir) { Pathname.new(Dir.mktmpdir("vagrant")) }
   let(:env)      do
     # We need to create a Vagrantfile so that this test environment
     # has a proper root path
@@ -36,7 +41,8 @@ describe Vagrant::Machine do
   # Returns a new instance with the test data
   def new_instance
     described_class.new(name, provider_name, provider_cls, provider_config,
-                        provider_options, config, data_dir, box, env)
+                        provider_options, config, data_dir, box,
+                        env, env.vagrantfile)
   end
 
   describe "initialization" do
@@ -47,8 +53,13 @@ describe Vagrant::Machine do
       #
       # @yield [machine] Yields the machine that the provider initialization
       #   method received so you can run additional tests on it.
-      def provider_init_test
+      def provider_init_test(instance=nil)
         received_machine = nil
+
+        if !instance
+          instance = double("instance")
+          instance.stub(:_initialize => nil)
+        end
 
         provider_cls = double("provider_cls")
         provider_cls.should_receive(:new) do |machine|
@@ -61,12 +72,14 @@ describe Vagrant::Machine do
 
           # Yield our machine if we want to do additional tests
           yield machine if block_given?
-        end
+          true
+        end.and_return(instance)
 
         # Initialize a new machine and verify that we properly receive
         # the machine we expect.
         instance = described_class.new(name, provider_name, provider_cls, provider_config,
-                                       provider_options, config, data_dir, box, env)
+                                       provider_options, config, data_dir, box,
+                                       env, env.vagrantfile)
         received_machine.should eql(instance)
       end
 
@@ -99,6 +112,12 @@ describe Vagrant::Machine do
         end
       end
 
+      it "should have the vagrantfile" do
+        provider_init_test do |machine|
+          expect(machine.vagrantfile).to equal(env.vagrantfile)
+        end
+      end
+
       it "should have access to the ID" do
         # Stub this because #id= calls it.
         provider.stub(:machine_id_changed)
@@ -115,6 +134,17 @@ describe Vagrant::Machine do
         provider_init_test do |machine|
           machine.provider.should be_nil
         end
+      end
+
+      it "should initialize the capabilities" do
+        instance = double("instance")
+        instance.should_receive(:_initialize).with do |p, m|
+          expect(p).to eq(provider_name)
+          expect(m.name).to eq(name)
+          true
+        end
+
+        provider_init_test(instance)
       end
     end
   end
@@ -225,8 +255,8 @@ describe Vagrant::Machine do
     it "should return the configured guest" do
       result = instance.guest
       result.should be_kind_of(Vagrant::Guest)
-      result.ready?.should be
-      result.chain[0][0].should == :test
+      expect(result).to be_ready
+      expect(result.capability_host_chain[0][0]).to eql(:test)
     end
   end
 
@@ -261,6 +291,7 @@ describe Vagrant::Machine do
       second = new_instance
       second.id.should == "foo"
       second.id = nil
+      expect(second.id).to be_nil
 
       third = new_instance
       third.id.should be_nil
@@ -279,7 +310,7 @@ describe Vagrant::Machine do
       let(:provider_ssh_info) { {} }
 
       before(:each) do
-        provider.should_receive(:ssh_info).and_return(provider_ssh_info)
+        provider.stub(:ssh_info).and_return(provider_ssh_info)
       end
 
       [:host, :port, :username].each do |type|
@@ -331,14 +362,24 @@ describe Vagrant::Machine do
       it "should return the provider private key if given" do
         provider_ssh_info[:private_key_path] = "/foo"
 
-        instance.ssh_info[:private_key_path].should == "/foo"
+        instance.ssh_info[:private_key_path].should == [File.expand_path("/foo", env.root_path)]
       end
 
       it "should return the configured SSH key path if set" do
         provider_ssh_info[:private_key_path] = nil
         instance.config.ssh.private_key_path = "/bar"
 
-        instance.ssh_info[:private_key_path].should == "/bar"
+        instance.ssh_info[:private_key_path].should == [File.expand_path("/bar", env.root_path)]
+      end
+
+      it "should return the array of SSH keys if set" do
+        provider_ssh_info[:private_key_path] = nil
+        instance.config.ssh.private_key_path = ["/foo", "/bar"]
+
+        instance.ssh_info[:private_key_path].should == [
+          File.expand_path("/foo", env.root_path),
+          File.expand_path("/bar", env.root_path),
+        ]
       end
 
       context "expanding path relative to the root path" do
@@ -346,7 +387,7 @@ describe Vagrant::Machine do
           provider_ssh_info[:private_key_path] = "~/foo"
 
           instance.ssh_info[:private_key_path].should ==
-            File.expand_path("~/foo", env.root_path)
+            [File.expand_path("~/foo", env.root_path)]
         end
 
         it "should with the config private key path" do
@@ -354,7 +395,7 @@ describe Vagrant::Machine do
           instance.config.ssh.private_key_path = "~/bar"
 
           instance.ssh_info[:private_key_path].should ==
-            File.expand_path("~/bar", env.root_path)
+            [File.expand_path("~/bar", env.root_path)]
         end
       end
 
@@ -362,7 +403,31 @@ describe Vagrant::Machine do
         provider_ssh_info[:private_key_path] = nil
         instance.config.ssh.private_key_path = nil
 
-        instance.ssh_info[:private_key_path].should == instance.env.default_private_key_path.to_s
+        instance.ssh_info[:private_key_path].should ==
+          [instance.env.default_private_key_path.to_s]
+      end
+
+      it "should not set any default private keys if a password is specified" do
+        provider_ssh_info[:private_key_path] = nil
+        instance.config.ssh.private_key_path = nil
+        instance.config.ssh.password = ""
+
+        expect(instance.ssh_info[:private_key_path]).to be_empty
+        expect(instance.ssh_info[:password]).to eql("")
+      end
+
+      it "should return the private key in the data dir above all else" do
+        provider_ssh_info[:private_key_path] = nil
+        instance.config.ssh.private_key_path = nil
+        instance.config.ssh.password = ""
+
+        instance.data_dir.join("private_key").open("w+") do |f|
+          f.write("hey")
+        end
+
+        expect(instance.ssh_info[:private_key_path]).to eql(
+          [instance.data_dir.join("private_key").to_s])
+        expect(instance.ssh_info[:password]).to eql("")
       end
     end
   end
@@ -379,6 +444,20 @@ describe Vagrant::Machine do
       provider.should_receive(:state).and_return(:old_school)
       expect { instance.state }.
         to raise_error(Vagrant::Errors::MachineStateInvalid)
+    end
+  end
+
+  describe "#with_ui" do
+    it "temporarily changes the UI" do
+      ui = Object.new
+      changed_ui = nil
+
+      subject.with_ui(ui) do
+        changed_ui = subject.ui
+      end
+
+      expect(changed_ui).to equal(ui)
+      expect(subject.ui).to_not equal(ui)
     end
   end
 end

@@ -28,9 +28,15 @@ module Vagrant
           # not yet ready for SSH, so we raise this exception.
           raise Errors::SSHNotReady if info.nil?
 
-          if info[:private_key_path]
-            # Check the SSH key permissions
-            SSH.check_key_permissions(Pathname.new(info[:private_key_path]))
+          info[:private_key_path] ||= []
+
+          # Check SSH key permissions
+          info[:private_key_path].each do |path|
+            SSH.check_key_permissions(Pathname.new(path))
+          end
+
+          if info[:private_key_path].empty? && info[:password]
+            env[:ui].warn(I18n.t("vagrant.ssh_exec_password"))
           end
 
           # Exec!

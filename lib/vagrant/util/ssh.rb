@@ -1,8 +1,11 @@
 require "log4r"
 
+require 'childprocess'
+
 require "vagrant/util/file_mode"
 require "vagrant/util/platform"
 require "vagrant/util/safe_exec"
+require "vagrant/util/safe_puts"
 require "vagrant/util/subprocess"
 require "vagrant/util/which"
 
@@ -12,6 +15,8 @@ module Vagrant
     # helpers don't depend on any part of Vagrant except what is given
     # via the parameters.
     class SSH
+      extend SafePuts
+
       LOGGER = Log4r::Logger.new("vagrant::util::ssh")
 
       # Checks that the permissions for a private key are valid, and fixes
@@ -68,7 +73,7 @@ module Vagrant
               :host => ssh_info[:host],
               :port => ssh_info[:port],
               :username => ssh_info[:username],
-              :key_path => ssh_info[:private_key_path]
+              :key_path => ssh_info[:private_key_path].join(", ")
           end
 
           raise Errors::SSHUnavailable
@@ -83,7 +88,7 @@ module Vagrant
               :host => ssh_info[:host],
               :port => ssh_info[:port],
               :username => ssh_info[:username],
-              :key_path => ssh_info[:private_key_path]
+              :key_path => ssh_info[:private_key_path].join(", ")
           end
         end
 
@@ -100,6 +105,7 @@ module Vagrant
         # Command line options
         command_options = [
           "-p", options[:port].to_s,
+          "-o", "Compression=yes",
           "-o", "DSAAuthentication=yes",
           "-o", "LogLevel=FATAL",
           "-o", "StrictHostKeyChecking=no",
@@ -113,7 +119,11 @@ module Vagrant
         end
 
         # If we're not in plain mode, attach the private key path.
-        command_options += ["-i", options[:private_key_path].to_s] if !plain_mode
+        if !plain_mode
+          options[:private_key_path].each do |path|
+            command_options += ["-i", path.to_s]
+          end
+        end
 
         if ssh_info[:forward_x11]
           # Both are required so that no warnings are shown regarding X11
@@ -147,8 +157,25 @@ module Vagrant
         ENV["nodosfilewarning"] = "1" if Platform.cygwin?
 
         # Invoke SSH with all our options
-        LOGGER.info("Invoking SSH: #{command_options.inspect}")
-        SafeExec.exec("ssh", *command_options)
+        if !opts[:subprocess]
+          LOGGER.info("Invoking SSH: #{command_options.inspect}")
+          SafeExec.exec("ssh", *command_options)
+          return
+        end
+
+        # If we're still here, it means we're supposed to subprocess
+        # out to ssh rather than exec it.
+        #
+        # There is a lot of special-case code for Windows below. Windows
+        # has a bug with creating a TTY file handle for stdin so SSH doesn't
+        # work well. We simulate it by copying stdin over. It isn't ideal,
+        # but it kind of works.
+        LOGGER.info("Executing SSH in subprocess: #{command_options.inspect}")
+        process = ChildProcess.build("ssh", *command_options)
+        process.io.inherit!
+        process.start
+        process.wait
+        return process.exit_code
       end
     end
   end

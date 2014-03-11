@@ -1,10 +1,8 @@
 require File.expand_path("../../../../base", __FILE__)
 
 describe Vagrant::Plugin::V2::Plugin do
-  after(:each) do
-    # We want to make sure that the registered plugins remains empty
-    # after each test.
-    described_class.manager.reset!
+  before do
+    described_class.stub(manager: Vagrant::Plugin::V2::Manager.new)
   end
 
   it "should be able to set and get the name" do
@@ -53,7 +51,28 @@ describe Vagrant::Plugin::V2::Plugin do
         command("foo") { "bar" }
       end
 
-      plugin.command[:foo].should == "bar"
+      expect(plugin.components.commands.keys).to be_include(:foo)
+      expect(plugin.components.commands[:foo][0].call).to eql("bar")
+    end
+
+    it "should register command classes with options" do
+      plugin = Class.new(described_class) do
+        command("foo", opt: :bar) { "bar" }
+      end
+
+      expect(plugin.components.commands.keys).to be_include(:foo)
+      expect(plugin.components.commands[:foo][0].call).to eql("bar")
+      expect(plugin.components.commands[:foo][1][:opt]).to eql(:bar)
+    end
+
+    it "should register commands as primary by default" do
+      plugin = Class.new(described_class) do
+        command("foo") { "bar" }
+        command("bar", primary: false) { "bar" }
+      end
+
+      expect(plugin.components.commands[:foo][1][:primary]).to be_true
+      expect(plugin.components.commands[:bar][1][:primary]).to be_false
     end
 
     ["spaces bad", "sym^bols"].each do |bad|
@@ -79,8 +98,8 @@ describe Vagrant::Plugin::V2::Plugin do
       # Now verify when we actually get the command key that
       # a proper error is raised.
       expect {
-        plugin.command[:foo]
-      }.to raise_error(StandardError)
+        plugin.components.commands[:foo][0].call
+      }.to raise_error(StandardError, "FAIL!")
     end
   end
 
@@ -192,7 +211,7 @@ describe Vagrant::Plugin::V2::Plugin do
         host("foo") { "bar" }
       end
 
-      plugin.host[:foo].should == "bar"
+      plugin.components.hosts[:foo].should == ["bar", nil]
     end
 
     it "should lazily register host classes" do
@@ -211,6 +230,16 @@ describe Vagrant::Plugin::V2::Plugin do
       expect {
         plugin.host[:foo]
       }.to raise_error(StandardError)
+    end
+  end
+
+  describe "host capabilities" do
+    it "should register host capabilities" do
+      plugin = Class.new(described_class) do
+        host_capability("foo", "bar") { "baz" }
+      end
+
+      plugin.components.host_capabilities[:foo][:bar].should == "baz"
     end
   end
 
@@ -250,6 +279,16 @@ describe Vagrant::Plugin::V2::Plugin do
     end
   end
 
+  describe "provider capabilities" do
+    it "should register host capabilities" do
+      plugin = Class.new(described_class) do
+        provider_capability("foo", "bar") { "baz" }
+      end
+
+      plugin.components.provider_capabilities[:foo][:bar].should == "baz"
+    end
+  end
+
   describe "provisioners" do
     it "should register provisioner classes" do
       plugin = Class.new(described_class) do
@@ -274,6 +313,42 @@ describe Vagrant::Plugin::V2::Plugin do
       # a proper error is raised.
       expect {
         plugin.provisioner[:foo]
+      }.to raise_error(StandardError)
+    end
+  end
+
+  describe "synced folders" do
+    it "should register implementations" do
+      plugin = Class.new(described_class) do
+        synced_folder("foo") { "bar" }
+      end
+
+      plugin.components.synced_folders[:foo].should == ["bar", 10]
+    end
+
+    it "should be able to specify priorities" do
+      plugin = Class.new(described_class) do
+        synced_folder("foo", 50) { "bar" }
+      end
+
+      plugin.components.synced_folders[:foo].should == ["bar", 50]
+    end
+
+    it "should lazily register implementations" do
+      # Below would raise an error if the value of the config class was
+      # evaluated immediately. By asserting that this does not raise an
+      # error, we verify that the value is actually lazily loaded
+      plugin = nil
+      expect {
+        plugin = Class.new(described_class) do
+          synced_folder("foo") { raise StandardError, "FAIL!" }
+        end
+      }.to_not raise_error
+
+      # Now verify when we actually get the configuration key that
+      # a proper error is raised.
+      expect {
+        plugin.components.synced_folders[:foo]
       }.to raise_error(StandardError)
     end
   end

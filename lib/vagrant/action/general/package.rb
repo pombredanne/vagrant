@@ -23,7 +23,7 @@ module Vagrant
           @app = app
 
           env["package.files"]  ||= {}
-          env["package.output"] ||= env[:global_config].package.name
+          env["package.output"] ||= "package.box"
         end
 
         def call(env)
@@ -34,12 +34,14 @@ module Vagrant
           raise Errors::PackageRequiresDirectory if !env["package.directory"] ||
             !File.directory?(env["package.directory"])
 
-          compress
-
           @app.call(env)
+
+          compress
         end
 
         def recover(env)
+          @env = env
+
           # There are certain exceptions that we don't delete the file for.
           ignore_exc = [Errors::PackageOutputDirectory, Errors::PackageOutputExists]
           ignore_exc.each do |exc|

@@ -4,6 +4,10 @@ module VagrantPlugins
   module CommandBox
     module Command
       class Root < Vagrant.plugin("2", :command)
+        def self.synopsis
+          "manages boxes: installation, removal, etc."
+        end
+
         def initialize(argv, env)
           super
 
@@ -20,6 +24,11 @@ module VagrantPlugins
             List
           end
 
+          @subcommands.register(:outdated) do
+            require_relative "outdated"
+            Outdated
+          end
+
           @subcommands.register(:remove) do
             require File.expand_path("../remove", __FILE__)
             Remove
@@ -28,6 +37,11 @@ module VagrantPlugins
           @subcommands.register(:repackage) do
             require File.expand_path("../repackage", __FILE__)
             Repackage
+          end
+
+          @subcommands.register(:update) do
+            require_relative "update"
+            Update
           end
         end
 
@@ -50,7 +64,7 @@ module VagrantPlugins
         # Prints the help out for this command
         def help
           opts = OptionParser.new do |opts|
-            opts.banner = "Usage: vagrant box <command> [<args>]"
+            opts.banner = "Usage: vagrant box <subcommand> [<args>]"
             opts.separator ""
             opts.separator "Available subcommands:"
 
@@ -64,7 +78,7 @@ module VagrantPlugins
             end
 
             opts.separator ""
-            opts.separator "For help on any individual command run `vagrant box COMMAND -h`"
+            opts.separator "For help on any individual subcommand run `vagrant box <subcommand> -h`"
           end
 
           @env.ui.info(opts.help, :prefix => false)

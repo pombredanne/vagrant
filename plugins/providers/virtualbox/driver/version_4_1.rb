@@ -107,12 +107,17 @@ module VagrantPlugins
 
             if adapter[:bridge]
               args.concat(["--bridgeadapter#{adapter[:adapter]}",
-                          adapter[:bridge]])
+                          adapter[:bridge], "--cableconnected#{adapter[:adapter]}", "on"])
             end
 
             if adapter[:hostonly]
               args.concat(["--hostonlyadapter#{adapter[:adapter]}",
                           adapter[:hostonly]])
+            end
+
+            if adapter[:intnet]
+              args.concat(["--intnet#{adapter[:adapter]}",
+                          adapter[:intnet]])
             end
 
             if adapter[:mac_address]
@@ -129,7 +134,7 @@ module VagrantPlugins
         end
 
         def execute_command(command)
-          raw(*command)
+          execute(*command)
         end
 
         def export(path)
@@ -267,6 +272,19 @@ module VagrantPlugins
           end
 
           return nil
+        end
+
+        def read_guest_ip(adapter_number)
+          read_guest_property("/VirtualBox/GuestInfo/Net/#{adapter_number}/V4/IP")
+        end
+
+        def read_guest_property(property)
+          output = execute("guestproperty", "get", @uuid, property)
+          if output =~ /^Value: (.+?)$/
+            $1.to_s
+          else
+            raise Vagrant::Errors::VirtualBoxGuestPropertyNotFound, :guest_property => property
+          end
         end
 
         def read_host_only_interfaces
@@ -427,7 +445,12 @@ module VagrantPlugins
               "--hostpath",
               folder[:hostpath]]
             args << "--transient" if folder.has_key?(:transient) && folder[:transient]
+
+            # Add the shared folder
             execute("sharedfolder", "add", @uuid, *args)
+
+            # Enable symlinks on the shared folder
+            execute("setextradata", @uuid, "VBoxInternal2/SharedFoldersEnableSymlinksCreate/#{folder[:name]}", "1")
           end
         end
 
@@ -477,7 +500,23 @@ module VagrantPlugins
         end
 
         def vm_exists?(uuid)
-          raw("showvminfo", uuid).exit_code == 0
+          5.times do |i|
+            result = raw("showvminfo", uuid)
+            return true if result.exit_code == 0
+
+            # GH-2479: Sometimes this happens. In this case, retry. If
+            # we don't see this text, the VM really probably doesn't exist.
+            return false if !result.stderr.include?("CO_E_SERVER_EXEC_FAILURE")
+
+            # Sleep a bit though to give VirtualBox time to fix itself
+            sleep 2
+          end
+
+          # If we reach this point, it means that we consistently got the
+          # failure, do a standard vboxmanage now. This will raise an
+          # exception if it fails again.
+          execute("showvminfo", uuid)
+          return true
         end
       end
     end

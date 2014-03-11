@@ -5,12 +5,16 @@ module VagrantPlugins
       attr_accessor :port
       attr_accessor :private_key_path
       attr_accessor :username
+      attr_accessor :password
+      attr_accessor :insert_key
 
       def initialize
         @host             = UNSET_VALUE
         @port             = UNSET_VALUE
         @private_key_path = UNSET_VALUE
         @username         = UNSET_VALUE
+        @password         = UNSET_VALUE
+        @insert_key       = UNSET_VALUE
       end
 
       def finalize!
@@ -18,6 +22,12 @@ module VagrantPlugins
         @port             = nil if @port == UNSET_VALUE
         @private_key_path = nil if @private_key_path == UNSET_VALUE
         @username         = nil if @username == UNSET_VALUE
+        @password         = nil if @password == UNSET_VALUE
+        @insert_key       = true if @insert_key == UNSET_VALUE
+
+        if @private_key_path && !@private_key_path.is_a?(Array)
+          @private_key_path = [@private_key_path]
+        end
       end
 
       # NOTE: This is _not_ a valid config validation method, since it
@@ -28,9 +38,15 @@ module VagrantPlugins
       def validate(machine)
         errors = _detected_errors
 
-        if @private_key_path && \
-          !File.file?(File.expand_path(@private_key_path, machine.env.root_path))
-          errors << I18n.t("vagrant.config.ssh.private_key_missing", :path => @private_key_path)
+        if @private_key_path
+          @private_key_path.each do |raw_path|
+            path = File.expand_path(raw_path, machine.env.root_path)
+            if !File.file?(path)
+              errors << I18n.t(
+                "vagrant.config.ssh.private_key_missing",
+                path: raw_path)
+            end
+          end
         end
 
         errors

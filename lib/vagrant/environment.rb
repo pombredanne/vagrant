@@ -8,12 +8,20 @@ require 'log4r'
 
 require 'vagrant/util/file_mode'
 require 'vagrant/util/platform'
+require "vagrant/vagrantfile"
 
 module Vagrant
-  # Represents a single Vagrant environment. A "Vagrant environment" is
-  # defined as basically a folder with a "Vagrantfile." This class allows
-  # access to the VMs, CLI, etc. all in the scope of this environment.
+  # A "Vagrant environment" represents a configuration of how Vagrant
+  # should behave: data directories, working directory, UI output,
+  # etc. In day-to-day usage, every `vagrant` invocation typically
+  # leads to a single Vagrant environment.
   class Environment
+    # This is the current version that this version of Vagrant is
+    # compatible with in the home directory.
+    #
+    # @return [String]
+    CURRENT_SETUP_VERSION = "1.5"
+
     DEFAULT_LOCAL_DATA = ".vagrant"
 
     # The `cwd` that this environment represents
@@ -62,12 +70,12 @@ module Vagrant
     # to the `Dir.pwd` (which is the cwd of the executing process).
     def initialize(opts=nil)
       opts = {
-        :cwd => nil,
-        :home_path => nil,
-        :local_data_path => nil,
-        :lock_path => nil,
-        :ui_class => nil,
-        :vagrantfile_name => nil
+        :cwd              => nil,
+        :home_path        => nil,
+        :local_data_path  => nil,
+        :lock_path        => nil,
+        :ui_class         => nil,
+        :vagrantfile_name => nil,
       }.merge(opts || {})
 
       # Set the default working directory to look for the vagrantfile
@@ -107,11 +115,15 @@ module Vagrant
       @logger.info("  - cwd: #{cwd}")
 
       # Setup the home directory
-      setup_home_path
+      @home_path  ||= Vagrant.user_data_path
+      @home_path  = Util::Platform.fs_real_path(@home_path)
       @boxes_path = @home_path.join("boxes")
       @data_dir   = @home_path.join("data")
       @gems_path  = @home_path.join("gems")
       @tmp_path   = @home_path.join("tmp")
+
+      # Prepare the directories
+      setup_home_path
 
       # Setup the local data directory. If a configuration path is given,
       # then it is expanded relative to the working directory. Otherwise,
@@ -128,8 +140,9 @@ module Vagrant
       @default_private_key_path = @home_path.join("insecure_private_key")
       copy_insecure_private_key
 
-      # Load the plugins
-      load_plugins
+      # Call the hooks that does not require configurations to be loaded
+      # by using a "clean" action runner
+      hook(:environment_plugins_loaded, runner: Action::Runner.new(env: self))
 
       # Call the environment load hooks
       hook(:environment_load)
@@ -143,9 +156,24 @@ module Vagrant
       "#<#{self.class}: #{@cwd}>"
     end
 
-    #---------------------------------------------------------------
-    # Helpers
-    #---------------------------------------------------------------
+    # Action runner for executing actions in the context of this environment.
+    #
+    # @return [Action::Runner]
+    def action_runner
+      @action_runner ||= Action::Runner.new do
+        {
+          :action_runner  => action_runner,
+          :box_collection => boxes,
+          :hook           => method(:hook),
+          :host           => host,
+          :gems_path      => gems_path,
+          :home_path      => home_path,
+          :root_path      => root_path,
+          :tmp_path       => tmp_path,
+          :ui             => @ui
+        }
+      end
+    end
 
     # Returns a list of machines that this environment is currently
     # managing that physically have been created.
@@ -211,6 +239,15 @@ module Vagrant
       end
     end
 
+    # Makes a call to the CLI with the given arguments as if they
+    # came from the real command line (sometimes they do!). An example:
+    #
+    #     env.cli("package", "--vagrantfile", "Vagrantfile")
+    #
+    def cli(*args)
+      CLI.new(args.flatten, self).execute
+    end
+
     # This returns the provider name for the default provider for this
     # environment. The provider returned is currently hardcoded to "virtualbox"
     # but one day should be a detected valid, best-case provider for this
@@ -225,56 +262,118 @@ module Vagrant
     #
     # @return [BoxCollection]
     def boxes
-      @_boxes ||= BoxCollection.new(boxes_path, temp_dir_root: tmp_path)
+      @_boxes ||= BoxCollection.new(
+        boxes_path,
+        hook: method(:hook),
+        temp_dir_root: tmp_path)
     end
 
-    # This is the global config, comprised of loading configuration from
-    # the default, home, and root Vagrantfiles. This configuration is only
-    # really useful for reading the list of virtual machines, since each
-    # individual VM can override _most_ settings.
+    # Returns the {Config::Loader} that can be used to load Vagrantflies
+    # given the settings of this environment.
     #
-    # This is lazy-loaded upon first use.
-    #
-    # @return [Object]
-    def config_global
-      return @config_global if @config_global
-
-      @logger.info("Initializing config...")
+    # @return [Config::Loader]
+    def config_loader
+      return @config_loader if @config_loader
 
       home_vagrantfile = nil
       root_vagrantfile = nil
       home_vagrantfile = find_vagrantfile(home_path) if home_path
-      root_vagrantfile = find_vagrantfile(root_path, @vagrantfile_name) if root_path
+      if root_path
+        root_vagrantfile = find_vagrantfile(root_path, @vagrantfile_name)
+      end
 
-      # Create the configuration loader and set the sources that are global.
-      # We use this to load the configuration, and the list of machines we are
-      # managing. Then, the actual individual configuration is loaded for
-      # each {#machine} call.
-      @config_loader = Config::Loader.new(Config::VERSIONS, Config::VERSIONS_ORDER)
-      @config_loader.set(:default, File.expand_path("config/default.rb", Vagrant.source_root))
+      @config_loader = Config::Loader.new(
+        Config::VERSIONS, Config::VERSIONS_ORDER)
       @config_loader.set(:home, home_vagrantfile) if home_vagrantfile
       @config_loader.set(:root, root_vagrantfile) if root_vagrantfile
-
-      # Make the initial call to get the "global" config. This is mostly
-      # only useful to get the list of machines that we are managing.
-      # Because of this, we ignore any warnings or errors.
-      @config_global, _ = @config_loader.load([:default, :home, :root])
-
-      # Return the config
-      @config_global
+      @config_loader
     end
 
     # This defines a hook point where plugin action hooks that are registered
     # against the given name will be run in the context of this environment.
     #
     # @param [Symbol] name Name of the hook.
-    def hook(name)
+    # @param [Action::Runner] action_runner A custom action runner for running hooks.
+    def hook(name, opts=nil)
       @logger.info("Running hook: #{name}")
-      callable = Action::Builder.new
-      action_runner.run(
-        callable,
-        :action_name => name,
-        :env => self)
+      opts ||= {}
+      opts[:callable] ||= Action::Builder.new
+      opts[:runner] ||= action_runner
+      opts[:action_name] = name
+      opts[:env] = self
+      opts.delete(:runner).run(opts.delete(:callable), opts)
+    end
+
+    # Returns the host object associated with this environment.
+    #
+    # @return [Class]
+    def host
+      return @host if defined?(@host)
+
+      # Determine the host class to use. ":detect" is an old Vagrant config
+      # that shouldn't be valid anymore, but we respect it here by assuming
+      # its old behavior. No need to deprecate this because I thin it is
+      # fairly harmless.
+      host_klass = vagrantfile.config.vagrant.host
+      host_klass = nil if host_klass == :detect
+
+      begin
+        @host = Host.new(
+          host_klass,
+          Vagrant.plugin("2").manager.hosts,
+          Vagrant.plugin("2").manager.host_capabilities,
+          self)
+      rescue Errors::CapabilityHostNotDetected
+        # If the auto-detect failed, then we create a brand new host
+        # with no capabilities and use that. This should almost never happen
+        # since Vagrant works on most host OS's now, so this is a "slow path"
+        klass = Class.new(Vagrant.plugin("2", :host)) do
+          def detect?(env); true; end
+        end
+
+        hosts     = { generic: [klass, nil] }
+        host_caps = {}
+
+        @host = Host.new(:generic, hosts, host_caps, self)
+      rescue Errors::CapabilityHostExplicitNotDetected => e
+        raise Errors::HostExplicitNotDetected, e.extra_data
+      end
+    end
+
+    # This returns the path which Vagrant uses to determine the location
+    # of the file lock. This is specific to each operating system.
+    def lock_path
+      @lock_path || tmp_path.join("vagrant.lock")
+    end
+
+    # This locks Vagrant for the duration of the block passed to this
+    # method. During this time, any other environment which attempts
+    # to lock which points to the same lock file will fail.
+    def lock
+      # If we don't have a block, then locking is useless, so ignore it
+      return if !block_given?
+
+      # This allows multiple locks in the same process to be nested
+      return yield if @lock_acquired
+
+      File.open(lock_path, "w+") do |f|
+        # The file locking fails only if it returns "false." If it
+        # succeeds it returns a 0, so we must explicitly check for
+        # the proper error case.
+        raise Errors::EnvironmentLockedError if f.flock(File::LOCK_EX | File::LOCK_NB) === false
+
+        begin
+          # Mark that we have a lock
+          @lock_acquired = true
+
+          yield
+        ensure
+          # We need to make sure that no matter what this is always
+          # reset to false so we don't think we have a lock when we
+          # actually don't.
+          @lock_acquired = false
+        end
+      end
     end
 
     # This returns a machine with the proper provider for this environment.
@@ -305,128 +404,17 @@ module Vagrant
       end
 
       @logger.info("Uncached load of machine.")
-      sub_vm = config_global.vm.defined_vms[name]
-      if !sub_vm
-        raise Errors::MachineNotFound, :name => name, :provider => provider
-      end
-
-      provider_plugin  = Vagrant.plugin("2").manager.providers[provider]
-      if !provider_plugin
-        raise Errors::ProviderNotFound, :machine => name, :provider => provider
-      end
-
-      # Extra the provider class and options from the plugin data
-      provider_cls     = provider_plugin[0]
-      provider_options = provider_plugin[1]
-
-      # Build the machine configuration. This requires two passes: The first pass
-      # loads in the machine sub-configuration. Since this can potentially
-      # define a new box to base the machine from, we then make a second pass
-      # with the box Vagrantfile (if it has one).
-      vm_config_key = "vm_#{name}".to_sym
-      @config_loader.set(vm_config_key, sub_vm.config_procs)
-      config, config_warnings, config_errors = \
-        @config_loader.load([:default, :home, :root, vm_config_key])
-
-      # Determine the possible box formats for any boxes and find the box
-      box_formats = provider_options[:box_format] || provider
-      box = nil
-
-      # Set this variable in order to keep track of if the box changes
-      # too many times.
-      original_box = config.vm.box
-      box_changed  = false
-
-      load_box_and_overrides = lambda do
-        box = nil
-        if config.vm.box
-          begin
-            box = boxes.find(config.vm.box, box_formats)
-          rescue Errors::BoxUpgradeRequired
-            # Upgrade the box if we must
-            @logger.info("Upgrading box during config load: #{config.vm.box}")
-            boxes.upgrade(config.vm.box)
-            retry
-          end
-        end
-
-        # If a box was found, then we attempt to load the Vagrantfile for
-        # that box. We don't require a box since we allow providers to download
-        # boxes and so on.
-        if box
-          box_vagrantfile = find_vagrantfile(box.directory)
-          if box_vagrantfile
-            # The box has a custom Vagrantfile, so we load that into the config
-            # as well.
-            @logger.info("Box exists with Vagrantfile. Reloading machine config.")
-            box_config_key = "box_#{box.name}_#{box.provider}".to_sym
-            @config_loader.set(box_config_key, box_vagrantfile)
-            config, config_warnings, config_errors = \
-              @config_loader.load([:default, box_config_key, :home, :root, vm_config_key])
-          end
-        end
-
-        # If there are provider overrides for the machine, then we run
-        # those as well.
-        provider_overrides = config.vm.get_provider_overrides(provider)
-        if provider_overrides.length > 0
-          @logger.info("Applying #{provider_overrides.length} provider overrides. Reloading config.")
-          provider_override_key = "vm_#{name}_#{config.vm.box}_#{provider}".to_sym
-          @config_loader.set(provider_override_key, provider_overrides)
-          config, config_warnings, config_errors = \
-            @config_loader.load([:default, box_config_key, :home, :root, vm_config_key, provider_override_key])
-        end
-
-        if config.vm.box && original_box != config.vm.box
-          if box_changed
-            # We already changed boxes once, so report an error that a
-            # box is attempting to change boxes again.
-            raise Errors::BoxConfigChangingBox
-          end
-
-          # The box changed, probably due to the provider override. Let's
-          # run the configuration one more time with the new box.
-          @logger.info("Box changed to: #{config.vm.box}. Reloading configurations.")
-          original_box = config.vm.box
-          box_changed  = true
-
-          # Recurse so that we reload all the configurations
-          load_box_and_overrides.call
-        end
-      end
-
-      # Load the box and overrides configuration
-      load_box_and_overrides.call
-
-      # Get the provider configuration from the final loaded configuration
-      provider_config = config.vm.get_provider_config(provider)
 
       # Determine the machine data directory and pass it to the machine.
       # XXX: Permissions error here.
-      machine_data_path = @local_data_path.join("machines/#{name}/#{provider}")
+      machine_data_path = @local_data_path.join(
+        "machines/#{name}/#{provider}")
       FileUtils.mkdir_p(machine_data_path)
-
-      # If there were warnings or errors we want to output them
-      if !config_warnings.empty? || !config_errors.empty?
-        # The color of the output depends on whether we have warnings
-        # or errors...
-        level  = config_errors.empty? ? :warn : :error
-        output = Util::TemplateRenderer.render(
-          "config/messages",
-          :warnings => config_warnings,
-          :errors => config_errors).chomp
-        @ui.send(level, I18n.t("vagrant.general.config_upgrade_messages",
-                               name: name,
-                               :output => output))
-
-          # If we had errors, then we bail
-          raise Errors::ConfigUpgradeErrors if !config_errors.empty?
-      end
 
       # Create the machine and cache it for future calls. This will also
       # return the machine from this method.
-      @machines[cache_key] = Machine.new(name, provider, provider_cls, provider_config,
-                                         provider_options, config, machine_data_path, box, self)
+      @machines[cache_key] = vagrantfile.machine(
+        name, provider, boxes, machine_data_path, self)
     end
 
     # This returns a list of the configured machines for this environment.
@@ -435,7 +423,7 @@ module Vagrant
     #
     # @return [Array<Symbol>] Configured machine names.
     def machine_names
-      config_global.vm.defined_vm_keys.dup
+      vagrantfile.machine_names
     end
 
     # This returns the name of the machine that is the "primary." In the
@@ -445,80 +433,7 @@ module Vagrant
     #
     # @return [Symbol]
     def primary_machine_name
-      # If it is a single machine environment, then return the name
-      return machine_names.first if machine_names.length == 1
-
-      # If it is a multi-machine environment, then return the primary
-      config_global.vm.defined_vms.each do |name, subvm|
-        return name if subvm.options[:primary]
-      end
-
-      # If no primary was specified, nil it is
-      nil
-    end
-
-    # Unload the environment, running completion hooks. The environment
-    # should not be used after this (but CAN be, technically). It is
-    # recommended to always immediately set the variable to `nil` after
-    # running this so you can't accidentally run any more methods. Example:
-    #
-    #     env.unload
-    #     env = nil
-    #
-    def unload
-      hook(:environment_unload)
-    end
-
-    # Makes a call to the CLI with the given arguments as if they
-    # came from the real command line (sometimes they do!). An example:
-    #
-    #     env.cli("package", "--vagrantfile", "Vagrantfile")
-    #
-    def cli(*args)
-      CLI.new(args.flatten, self).execute
-    end
-
-    # Returns the host object associated with this environment.
-    #
-    # @return [Class]
-    def host
-      return @host if defined?(@host)
-
-      # Attempt to figure out the host class. Note that the order
-      # matters here, so please don't touch. Specifically: The symbol
-      # check is done after the detect check because the symbol check
-      # will return nil, and we don't want to trigger a detect load.
-      host_klass = config_global.vagrant.host
-      if host_klass.nil? || host_klass == :detect
-        hosts = Vagrant.plugin("2").manager.hosts.to_hash
-
-        # Get the flattened list of available hosts
-        host_klass = Hosts.detect(hosts)
-      end
-
-      # If no host class is detected, we use the base class.
-      host_klass ||= Vagrant.plugin("2", :host)
-
-      @host ||= host_klass.new(@ui)
-    end
-
-    # Action runner for executing actions in the context of this environment.
-    #
-    # @return [Action::Runner]
-    def action_runner
-      @action_runner ||= Action::Runner.new do
-        {
-          :action_runner  => action_runner,
-          :box_collection => boxes,
-          :global_config  => config_global,
-          :host           => host,
-          :gems_path      => gems_path,
-          :home_path      => home_path,
-          :root_path      => root_path,
-          :tmp_path       => tmp_path,
-          :ui             => @ui
-        }
-      end
+      vagrantfile.primary_machine_name
     end
 
     # The root path is the path where the top-most (loaded last)
@@ -541,37 +456,34 @@ module Vagrant
       @root_path = root_finder.call(cwd)
     end
 
-    # This returns the path which Vagrant uses to determine the location
-    # of the file lock. This is specific to each operating system.
-    def lock_path
-      @lock_path || tmp_path.join("vagrant.lock")
+    # Unload the environment, running completion hooks. The environment
+    # should not be used after this (but CAN be, technically). It is
+    # recommended to always immediately set the variable to `nil` after
+    # running this so you can't accidentally run any more methods. Example:
+    #
+    #     env.unload
+    #     env = nil
+    #
+    def unload
+      hook(:environment_unload)
     end
 
-    # This locks Vagrant for the duration of the block passed to this
-    # method. During this time, any other environment which attempts
-    # to lock which points to the same lock file will fail.
-    def lock
-      # This allows multiple locks in the same process to be nested
-      return yield if @lock_acquired
-
-      File.open(lock_path, "w+") do |f|
-        # The file locking fails only if it returns "false." If it
-        # succeeds it returns a 0, so we must explicitly check for
-        # the proper error case.
-        raise Errors::EnvironmentLockedError if f.flock(File::LOCK_EX | File::LOCK_NB) === false
-
-        begin
-          # Mark that we have a lock
-          @lock_acquired = true
-
-          yield
-        ensure
-          # We need to make sure that no matter what this is always
-          # reset to false so we don't think we have a lock when we
-          # actually don't.
-          @lock_acquired = false
-        end
-      end
+    # Represents the default Vagrantfile, or the Vagrantfile that is
+    # in the working directory or a parent of the working directory
+    # of this environment.
+    #
+    # The existence of this function is primarily a convenience. There
+    # is nothing stopping you from instantiating your own {Vagrantfile}
+    # and loading machines in any way you see fit. Typical behavior of
+    # Vagrant, however, loads this Vagrantfile.
+    #
+    # This Vagrantfile is comprised of two major sources: the Vagrantfile
+    # in the user's home directory as well as the "root" Vagrantfile or
+    # the Vagrantfile in the working directory (or parent).
+    #
+    # @return [Vagrantfile]
+    def vagrantfile
+      @vagrantfile ||= Vagrantfile.new(config_loader, [:home, :root])
     end
 
     #---------------------------------------------------------------
@@ -582,9 +494,6 @@ module Vagrant
     #
     # @return [Pathname]
     def setup_home_path
-      @home_path = Pathname.new(File.expand_path(@home_path ||
-                                                 ENV["VAGRANT_HOME"] ||
-                                                 default_home_path))
       @logger.info("Home path: #{@home_path}")
 
       # Setup the list of child directories that need to be created if they
@@ -605,13 +514,48 @@ module Vagrant
         end
       end
 
-      # Create the version file to mark the version of the home directory
-      # we're using.
+      # Attempt to write into the home directory to verify we can
+      begin
+        path = @home_path.join("perm_test")
+        path.open("w") do |f|
+          f.write("hello")
+        end
+        path.unlink
+      rescue Errno::EACCES
+        raise Errors::HomeDirectoryNotAccessible, home_path: @home_path.to_s
+      end
+
+      # Create the version file that we use to track the structure of
+      # the home directory. If we have an old version, we need to explicitly
+      # upgrade it. Otherwise, we just mark that its the current version.
       version_file = @home_path.join("setup_version")
+      if version_file.file?
+        version = version_file.read.chomp
+        if version > CURRENT_SETUP_VERSION
+          raise Errors::HomeDirectoryLaterVersion
+        end
+
+        case version
+        when CURRENT_SETUP_VERSION
+          # We're already good, at the latest version.
+        when "1.1"
+          # We need to update our directory structure
+          upgrade_home_path_v1_1
+
+          # Delete the version file so we put our latest version in
+          version_file.delete
+        else
+          raise Errors::HomeDirectoryUnknownVersion,
+            path: @home_path.to_s,
+            version: version
+        end
+      end
+
       if !version_file.file?
-        @logger.debug("Setting up the version file.")
+        @logger.debug(
+          "Creating home directory version file: #{CURRENT_SETUP_VERSION}")
         version_file.open("w") do |f|
-          f.write("1.1")
+          f.write(CURRENT_SETUP_VERSION)
         end
       end
 
@@ -684,23 +628,6 @@ module Vagrant
       end
     end
 
-    # This returns the default home directory path for Vagrant, which
-    # can differ depending on the system.
-    #
-    # @return [Pathname]
-    def default_home_path
-      path = "~/.vagrant.d"
-
-      # On Windows, we default ot the USERPROFILE directory if it
-      # is available. This is more compatible with Cygwin and sharing
-      # the home directory across shells.
-      if Util::Platform.windows? && ENV["USERPROFILE"]
-        path = "#{ENV["USERPROFILE"]}/.vagrant.d"
-      end
-
-      Pathname.new(path)
-    end
-
     # Finds the Vagrantfile in the given directory.
     #
     # @param [Pathname] path Path to search in.
@@ -715,40 +642,12 @@ module Vagrant
       nil
     end
 
-    # Loads the Vagrant plugins by properly setting up RubyGems so that
-    # our private gem repository is on the path.
-    def load_plugins
-      # Add our private gem path to the gem path and reset the paths
-      # that Rubygems knows about.
-      ENV["GEM_PATH"] = "#{@gems_path}#{::File::PATH_SEPARATOR}#{ENV["GEM_PATH"]}"
-      ::Gem.clear_paths
-
-      # If we're in a Bundler environment, don't load plugins. This only
-      # happens in plugin development environments.
-      if defined?(Bundler)
-        require 'bundler/shared_helpers'
-        if Bundler::SharedHelpers.in_bundle?
-          @logger.warn("In a bundler environment, not loading environment plugins!")
-          return
-        end
-      end
-
-      # Load the plugins
-      plugins_json_file = @home_path.join("plugins.json")
-      @logger.debug("Loading plugins from: #{plugins_json_file}")
-      if plugins_json_file.file?
-        data = JSON.parse(plugins_json_file.read)
-        data["installed"].each do |plugin|
-          @logger.info("Loading plugin from JSON: #{plugin}")
-          begin
-            Vagrant.require_plugin(plugin)
-          rescue Errors::PluginLoadError => e
-            @ui.error(e.message + "\n")
-          rescue Errors::PluginLoadFailed => e
-            @ui.error(e.message + "\n")
-          end
-        end
-      end
+    # This upgrades a home directory that was in the v1.1 format to the
+    # v1.5 format. It will raise exceptions if anything fails.
+    def upgrade_home_path_v1_1
+      collection = BoxCollection.new(
+        @home_path.join("boxes"), temp_dir_root: tmp_path)
+      collection.upgrade_v1_1_v1_5
     end
 
     # This upgrades a Vagrant 1.0.x "dotfile" to the new V2 format.

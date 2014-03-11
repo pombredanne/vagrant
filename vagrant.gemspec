@@ -14,22 +14,22 @@ Gem::Specification.new do |s|
   s.required_rubygems_version = ">= 1.3.6"
   s.rubyforge_project         = "vagrant"
 
-  s.add_dependency "childprocess", "~> 0.3.7"
+  s.add_dependency "bundler", "~> 1.5.2"
+  s.add_dependency "childprocess", "~> 0.5.0"
   s.add_dependency "erubis", "~> 2.7.0"
   s.add_dependency "i18n", "~> 0.6.0"
-  s.add_dependency "log4r", "~> 1.1.9"
-  s.add_dependency "net-ssh", "~> 2.6.6"
+  s.add_dependency "listen", "~> 2.4.0"
+  s.add_dependency "log4r", "~> 1.1.9", "< 1.1.11"
+  s.add_dependency "net-ssh", ">= 2.6.6", "< 2.8.0"
   s.add_dependency "net-scp", "~> 1.1.0"
+  s.add_dependency "rb-kqueue", "~> 0.2.0"
+  s.add_dependency "wdm", "~> 0.1.0"
 
   s.add_development_dependency "rake"
   s.add_development_dependency "contest", ">= 0.1.2"
   s.add_development_dependency "minitest", "~> 2.5.1"
   s.add_development_dependency "mocha"
-  # This has problems on Windows, we need to find a better way:
-  # s.add_development_dependency "sys-proctable", "~> 0.9.0"
-  s.add_development_dependency "rspec-core", "~> 2.11.0"
-  s.add_development_dependency "rspec-expectations", "~> 2.11.0"
-  s.add_development_dependency "rspec-mocks", "~> 2.11.0"
+  s.add_development_dependency "rspec", "~> 2.14.0"
 
   # The following block of code determines the files that should be included
   # in the gem. It does this by reading all the files in the directory where
@@ -39,6 +39,7 @@ Gem::Specification.new do |s|
   root_path      = File.dirname(__FILE__)
   all_files      = Dir.chdir(root_path) { Dir.glob("**/{*,.*}") }
   all_files.reject! { |file| [".", ".."].include?(File.basename(file)) }
+  all_files.reject! { |file| file.start_with?("website/") }
   gitignore_path = File.join(root_path, ".gitignore")
   gitignore      = File.readlines(gitignore_path)
   gitignore.map!    { |line| line.chomp.strip }

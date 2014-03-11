@@ -3,13 +3,17 @@ require 'optparse'
 module VagrantPlugins
   module CommandPackage
     class Command < Vagrant.plugin("2", :command)
+      def self.synopsis
+        "packages a running vagrant environment into a box"
+      end
+
       def execute
         options = {}
 
         opts = OptionParser.new do |o|
-          o.banner = "Usage: vagrant package [vm-name] [--base name] [--output name.box]"
-          o.separator "                       [--include one,two,three] [--vagrantfile file]"
-
+          o.banner = "Usage: vagrant package [options] [name]"
+          o.separator ""
+          o.separator "Options:"
           o.separator ""
 
           o.on("--base NAME", "Name of a VM in virtualbox to package as a base box") do |b|
@@ -20,11 +24,11 @@ module VagrantPlugins
             options[:output] = output
           end
 
-          o.on("--include x,y,z", Array, "Additional files to package with the box.") do |i|
+          o.on("--include FILE...", Array, "Additional files to package with the box") do |i|
             options[:include] = i
           end
 
-          o.on("--vagrantfile file", "Vagrantfile to package with the box.") do |v|
+          o.on("--vagrantfile FILE", "Vagrantfile to package with the box") do |v|
             options[:vagrantfile] = v
           end
         end
@@ -55,9 +59,9 @@ module VagrantPlugins
         vm = Vagrant::Machine.new(
           options[:base],
           :virtualbox, provider[0], nil, provider[1],
-          @env.config_global,
+          @env.vagrantfile.config,
           nil, nil,
-          @env, true)
+          @env, @env.vagrantfile, true)
         @logger.debug("Packaging base VM: #{vm.name}")
         package_vm(vm, options)
       end

@@ -9,6 +9,14 @@ module Vagrant
       class Command
         include Util::SafePuts
 
+        # This should return a brief (60 characters or less) synopsis of what
+        # this command does. It will be used in the output of the help.
+        #
+        # @return [String]
+        def self.synopsis
+          ""
+        end
+
         def initialize(argv, env)
           @argv = argv
           @env  = env
@@ -180,7 +188,14 @@ module Vagrant
           machines.reverse! if options[:reverse]
 
           # Go through each VM and yield it!
+          color_order = [:default]
+          color_index = 0
+
           machines.each do |machine|
+            # Set the machine color
+            machine.ui.opts[:color] = color_order[color_index % color_order.length]
+            color_index += 1
+
             @logger.info("With machine: #{machine.name} (#{machine.provider.inspect})")
             yield machine
           end

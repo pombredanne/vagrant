@@ -8,38 +8,85 @@ module VagrantPlugins
           options = {}
 
           opts = OptionParser.new do |o|
-            o.banner = "Usage: vagrant box add <name> <url> [--provider provider] [-h]"
+            o.banner = "Usage: vagrant box add [options] <url>"
+            o.separator ""
+            o.separator "Options:"
             o.separator ""
 
-            o.on("-f", "--force", "Overwrite an existing box if it exists.") do |f|
+            o.on("-c", "--clean", "Clean any temporary download files") do |c|
+              options[:clean] = c
+            end
+
+            o.on("-f", "--force", "Overwrite an existing box if it exists") do |f|
               options[:force] = f
             end
 
-            o.on("--insecure", "If set, SSL certs will not be validated.") do |i|
+            o.on("--insecure", "Do not validate SSL certificates") do |i|
               options[:insecure] = i
             end
 
-            o.on("--provider provider", String,
-                 "The provider that backs the box.") do |p|
+            o.on("--cacert FILE", String, "CA certificate for SSL download") do |c|
+              options[:ca_cert] = c
+            end
+
+            o.on("--cert FILE", String,
+                 "A client SSL cert, if needed") do |c|
+              options[:client_cert] = c
+            end
+
+            o.on("--provider PROVIDER", String, "Provider the box should satisfy") do |p|
               options[:provider] = p
+            end
+
+            o.on("--box-version VERSION", String, "Constrain version of the added box") do |v|
+              options[:version] = v
+            end
+
+            o.separator ""
+            o.separator "The options below only apply if you're adding a box file directly,"
+            o.separator "and not using a Vagrant server or a box structured like 'user/box':"
+            o.separator ""
+
+            o.on("--checksum CHECKSUM", String, "Checksum for the box") do |c|
+              options[:checksum] = c
+            end
+
+            o.on("--checksum-type TYPE", String, "Checksum type (md5, sha1, sha256)") do |c|
+              options[:checksum_type] = c.to_sym
+            end
+
+            o.on("--name BOX", String, "Name of the box") do |n|
+              options[:name] = n
             end
           end
 
           # Parse the options
           argv = parse_options(opts)
           return if !argv
-          raise Vagrant::Errors::CLIInvalidUsage, :help => opts.help.chomp if argv.length < 2
+          if argv.empty? || argv.length > 2
+            raise Vagrant::Errors::CLIInvalidUsage,
+              help: opts.help.chomp
+          end
 
-          # Get the provider if one was set
-          provider = nil
-          provider = options[:provider].to_sym if options[:provider]
+          url = argv[0]
+          if argv.length == 2
+            options[:name] = argv[0]
+            url = argv[1]
+          end
 
           @env.action_runner.run(Vagrant::Action.action_box_add, {
-            :box_name     => argv[0],
-            :box_provider => provider,
-            :box_url      => argv[1],
-            :box_force    => options[:force],
-            :box_download_insecure => options[:insecure],
+            box_url: url,
+            box_name: options[:name],
+            box_provider: options[:provider],
+            box_version: options[:version],
+            box_checksum_type: options[:checksum_type],
+            box_checksum: options[:checksum],
+            box_clean: options[:clean],
+            box_force: options[:force],
+            box_download_ca_cert: options[:ca_cert],
+            box_download_client_cert: options[:client_cert],
+            box_download_insecure: options[:insecure],
+            ui: Vagrant::UI::Prefixed.new(@env.ui, "box"),
           })
 
           # Success, exit status 0

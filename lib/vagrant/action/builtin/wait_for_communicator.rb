@@ -50,10 +50,15 @@ module Vagrant
           end
 
           # Wait for a result or an interrupt
-          env[:ui].info I18n.t("vagrant.boot_waiting")
+          env[:ui].output(I18n.t("vagrant.boot_waiting"))
           while ready_thr.alive? && states_thr.alive?
+            sleep 1
             return if env[:interrupted]
           end
+
+          # Join so that they can raise exceptions if there were any
+          ready_thr.join if !ready_thr.alive?
+          states_thr.join if !states_thr.alive?
 
           # If it went into a bad state, then raise an error
           if !states_thr[:result]
@@ -67,7 +72,7 @@ module Vagrant
             raise Errors::VMBootTimeout
           end
 
-          env[:ui].info I18n.t("vagrant.boot_completed")
+          env[:ui].output(I18n.t("vagrant.boot_completed"))
 
           # Make sure our threads are all killed
           ready_thr.kill

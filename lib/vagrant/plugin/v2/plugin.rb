@@ -73,7 +73,7 @@ module Vagrant
           # The name is currently not used but we want it for the future.
 
           hook_name ||= ALL_ACTIONS
-          components.action_hooks[hook_name] << block
+          components.action_hooks[hook_name.to_sym] << block
         end
 
         # Defines additional command line commands available by key. The key
@@ -81,21 +81,21 @@ module Vagrant
         # "vagrant foo" becomes available.
         #
         # @param [String] name Subcommand key.
-        def self.command(name=UNSET_VALUE, &block)
-          data[:command] ||= Registry.new
-
-          if name != UNSET_VALUE
-            # Validate the name of the command
-            if name.to_s !~ /^[-a-z0-9]+$/i
-              raise InvalidCommandName, "Commands can only contain letters, numbers, and hyphens"
-            end
-
-            # Register a new command class only if a name was given.
-            data[:command].register(name.to_sym, &block)
+        def self.command(name, **opts, &block)
+          # Validate the name of the command
+          if name.to_s !~ /^[-a-z0-9]+$/i
+            raise InvalidCommandName, "Commands can only contain letters, numbers, and hyphens"
           end
 
-          # Return the registry
-          data[:command]
+          # By default, the command is primary
+          opts[:primary] = true if !opts.has_key?(:primary)
+
+          # Register the command
+          components.commands.register(name.to_sym) do
+            [block, opts]
+          end
+
+          nil
         end
 
         # Defines additional communicators to be available. Communicators
@@ -135,7 +135,7 @@ module Vagrant
         #
         # @param [String] name Name of the guest.
         # @param [String] parent Name of the parent guest (if any)
-        def self.guest(name=UNSET_VALUE, parent=nil, &block)
+        def self.guest(name, parent=nil, &block)
           components.guests.register(name.to_sym) do
             parent = parent.to_sym if parent
 
@@ -160,14 +160,26 @@ module Vagrant
         # the given key.
         #
         # @param [String] name Name of the host.
-        def self.host(name=UNSET_VALUE, &block)
-          data[:hosts] ||= Registry.new
+        # @param [String] parent Name of the parent host (if any)
+        def self.host(name, parent=nil, &block)
+          components.hosts.register(name.to_sym) do
+            parent = parent.to_sym if parent
 
-          # Register a new host class only if a name was given
-          data[:hosts].register(name.to_sym, &block) if name != UNSET_VALUE
+            [block.call, parent]
+          end
+          nil
+        end
 
-          # Return the registry
-          data[:hosts]
+        # Defines a capability for the given host. The block should return
+        # a class/module that has a method with the capability name, ready
+        # to be executed. This means that if it is an instance method,
+        # the block should return an instance of the class.
+        #
+        # @param [String] host The name of the host
+        # @param [String] cap The name of the capability
+        def self.host_capability(host, cap, &block)
+          components.host_capabilities[host.to_sym].register(cap.to_sym, &block)
+          nil
         end
 
         # Registers additional providers to be available.
@@ -178,6 +190,18 @@ module Vagrant
             [block.call, options || {}]
           end
 
+          nil
+        end
+
+        # Defines a capability for the given provider. The block should return
+        # a class/module that has a method with the capability name, ready
+        # to be executed. This means that if it is an instance method,
+        # the block should return an instance of the class.
+        #
+        # @param [String] provider The name of the provider
+        # @param [String] cap The name of the capability
+        def self.provider_capability(provider, cap, &block)
+          components.provider_capabilities[provider.to_sym].register(cap.to_sym, &block)
           nil
         end
 
@@ -192,6 +216,19 @@ module Vagrant
 
           # Return the registry
           data[:provisioners]
+        end
+
+        # Registers additional synced folder implementations.
+        #
+        # @param [String] name Name of the implementation.
+        # @param [Integer] priority The priority of the implementation,
+        # higher (big) numbers are tried before lower (small) numbers.
+        def self.synced_folder(name, priority=10, &block)
+          components.synced_folders.register(name.to_sym) do
+            [block.call, priority]
+          end
+
+          nil
         end
 
         # Returns the internal data associated with this plugin. This

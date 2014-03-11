@@ -1,3 +1,5 @@
+require "delegate"
+require "io/console"
 require "thread"
 
 require "log4r"
@@ -15,14 +17,31 @@ module Vagrant
     # * `error`
     # * `success`
     class Interface
+      # Opts can be used to set some options. These options are implementation
+      # specific. See the implementation for more docs.
+      attr_accessor :opts
+
       def initialize
         @logger   = Log4r::Logger.new("vagrant::ui::interface")
+        @opts     = {}
       end
 
-      [:ask, :warn, :error, :info, :success].each do |method|
+      def initialize_copy(original)
+        super
+        @opts = original.opts.dup
+      end
+
+      [:ask, :detail, :warn, :error, :info, :output, :success].each do |method|
         define_method(method) do |message, *opts|
           # Log normal console messages
-          @logger.info { "#{method}: #{message}" }
+          begin
+            @logger.info { "#{method}: #{message}" }
+          rescue ThreadError
+            # We're being called in a trap-context. Wrap in a thread.
+            Thread.new do
+              @logger.info { "#{method}: #{message}" }
+            end.join
+          end
         end
       end
 
@@ -31,13 +50,12 @@ module Vagrant
         define_method(method) { |*args| }
       end
 
-      # Returns a new UI class that is scoped to the given resource name.
-      # Subclasses can then use this scope name to do whatever they please.
+      # For machine-readable output.
       #
-      # @param [String] scope_name
-      # @return [Interface]
-      def scope(scope_name)
-        self
+      # @param [String] type The type of the data
+      # @param [Array] data The data associated with the type
+      def machine(type, *data)
+        @logger.info("Machine: #{type} #{data.inspect}")
       end
     end
 
@@ -48,6 +66,42 @@ module Vagrant
 
         # Silent can't do this, obviously.
         raise Errors::UIExpectsTTY
+      end
+    end
+
+    class MachineReadable < Interface
+      include Util::SafePuts
+
+      def initialize
+        super
+
+        @lock = Mutex.new
+      end
+
+      def ask(*args)
+        super
+
+        # Machine-readable can't ask for input
+        raise Errors::UIExpectsTTY
+      end
+
+      def machine(type, *data)
+        opts = {}
+        opts = data.pop if data.last.kind_of?(Hash)
+
+        target = opts[:target] || ""
+
+        # Prepare the data by replacing characters that aren't outputted
+        data.each_index do |i|
+          data[i] = data[i].to_s.dup
+          data[i].gsub!(",", "%!(VAGRANT_COMMA)")
+          data[i].gsub!("\n", "\\n")
+          data[i].gsub!("\r", "\\r")
+        end
+
+        @lock.synchronize do
+          safe_puts("#{Time.now.utc.to_i},#{target},#{type},#{data.join(",")}")
+        end
       end
     end
 
@@ -65,7 +119,7 @@ module Vagrant
       # Use some light meta-programming to create the various methods to
       # output text to the UI. These all delegate the real functionality
       # to `say`.
-      [:info, :warn, :error, :success].each do |method|
+      [:detail, :info, :warn, :error, :output, :success].each do |method|
         class_eval <<-CODE
           def #{method}(message, *args)
             super(message)
@@ -82,17 +136,28 @@ module Vagrant
 
         # Setup the options so that the new line is suppressed
         opts ||= {}
+        opts[:echo]     = true  if !opts.has_key?(:echo)
         opts[:new_line] = false if !opts.has_key?(:new_line)
         opts[:prefix]   = false if !opts.has_key?(:prefix)
 
         # Output the data
         say(:info, message, opts)
 
+        input = nil
+        if opts[:echo]
+          input = $stdin.gets
+        else
+          input = $stdin.noecho(&:gets)
+
+          # Output a newline because without echo, the newline isn't
+          # echoed either.
+          say(:info, "\n", opts)
+        end
+
         # Get the results and chomp off the newline. We do a logical OR
         # here because `gets` can return a nil, for example in the case
         # that ctrl-D is pressed on the input.
-        input = $stdin.gets || ""
-        input.chomp
+        (input || "").chomp
       end
 
       # This is used to output progress reports to the UI.
@@ -112,16 +177,20 @@ module Vagrant
       end
 
       def clear_line
-        reset = "\r"
+        # See: http://en.wikipedia.org/wiki/ANSI_escape_code
+        reset = "\r\033[K"
 
         info(reset, :new_line => false)
       end
 
       # This method handles actually outputting a message of a given type
       # to the console.
-      def say(type, message, opts=nil)
+      def say(type, message, **opts)
         defaults = { :new_line => true, :prefix => true }
-        opts     = defaults.merge(opts || {})
+        opts     = defaults.merge(@opts).merge(opts)
+
+        # Don't output if we're hiding details
+        return if type == :detail && opts[:hide_detail]
 
         # Determine whether we're expecting to output our
         # own new line or not.
@@ -132,45 +201,94 @@ module Vagrant
         channel = type == :error || opts[:channel] == :error ? $stderr : $stdout
 
         # Output! We wrap this in a lock so that it safely outputs only
-        # one line at a time.
-        @lock.synchronize do
-          safe_puts(format_message(type, message, opts),
-                    :io => channel, :printer => printer)
-        end
+        # one line at a time. We wrap this in a thread because as of Ruby 2.0
+        # we can't acquire locks in a trap context (ctrl-c), so we have to
+        # do this.
+        Thread.new do
+          @lock.synchronize do
+            safe_puts(format_message(type, message, **opts),
+                      :io => channel, :printer => printer)
+          end
+        end.join
       end
 
-      def scope(scope_name)
-        BasicScope.new(self, scope_name)
-      end
-
-      # This is called by `say` to format the message for output.
-      def format_message(type, message, opts=nil)
-        opts ||= {}
-        message = "[#{opts[:scope]}] #{message}" if opts[:scope] && opts[:prefix]
+      def format_message(type, message, **opts)
         message
       end
     end
 
-    # This implements a scope for the {Basic} UI.
-    class BasicScope < Interface
-      def initialize(ui, scope)
+    # Prefixed wraps an existing UI and adds a prefix to it.
+    class Prefixed < Interface
+      # The prefix for `output` messages.
+      OUTPUT_PREFIX = "==> "
+
+      def initialize(ui, prefix)
         super()
 
-        @ui    = ui
-        @scope = scope
+        @prefix = prefix
+        @ui     = ui
       end
 
-      [:ask, :warn, :error, :info, :success].each do |method|
-        define_method(method) do |message, opts=nil|
-          opts ||= {}
-          opts[:scope] = @scope
-          @ui.send(method, message, opts)
-        end
+      def initialize_copy(original)
+        super
+        @ui = original.instance_variable_get(:@ui).dup
+      end
+
+      # Use some light meta-programming to create the various methods to
+      # output text to the UI. These all delegate the real functionality
+      # to `say`.
+      [:ask, :detail, :info, :warn, :error, :output, :success].each do |method|
+        class_eval <<-CODE
+          def #{method}(message, *args, **opts)
+            super(message)
+            if !@ui.opts.has_key?(:bold) && !opts.has_key?(:bold)
+              opts[:bold] = #{method.inspect} != :detail && \
+                #{method.inspect} != :ask
+            end
+            @ui.#{method}(format_message(#{method.inspect}, message, **opts), *args, **opts)
+          end
+        CODE
       end
 
       [:clear_line, :report_progress].each do |method|
-        # By default do nothing, these aren't logged
+        # By default do nothing, these aren't formatted
         define_method(method) { |*args| @ui.send(method, *args) }
+      end
+
+      # For machine-readable output, set the prefix in the
+      # options hash and continue it on.
+      def machine(type, *data)
+        opts = {}
+        opts = data.pop if data.last.is_a?(Hash)
+        opts[:target] = @prefix
+        data << opts
+        @ui.machine(type, *data)
+      end
+
+      # Return the parent's opts.
+      #
+      # @return [Hash]
+      def opts
+        @ui.opts
+      end
+
+      def format_message(type, message, **opts)
+        opts = self.opts.merge(opts)
+
+        prefix = ""
+        if !opts.has_key?(:prefix) || opts[:prefix]
+          prefix = OUTPUT_PREFIX
+          prefix = " " * OUTPUT_PREFIX.length if \
+            type == :detail || type == :ask || opts[:prefix_spaces]
+        end
+
+        # Fast-path if there is no prefix
+        return message if prefix.empty?
+
+        # Otherwise, make sure to prefix every line properly
+        message.split("\n").map do |line|
+          "#{prefix}#{@prefix}: #{line}"
+        end.join("\n")
       end
     end
 
@@ -180,34 +298,38 @@ module Vagrant
     class Colored < Basic
       # Terminal colors
       COLORS = {
-        :clear  => "\e[0m",
-        :red    => "\e[31m",
-        :green  => "\e[32m",
-        :yellow => "\e[33m"
-      }
-
-      # Mapping between type of message and the color to output
-      COLOR_MAP = {
-        :warn    => COLORS[:yellow],
-        :error   => COLORS[:red],
-        :success => COLORS[:green]
+        red:     31,
+        green:   32,
+        yellow:  33,
+        blue:    34,
+        magenta: 35,
+        cyan:    36,
+        white:   37,
       }
 
       # This is called by `say` to format the message for output.
-      def format_message(type, message, opts=nil)
+      def format_message(type, message, **opts)
         # Get the format of the message before adding color.
         message = super
 
-        # Colorize the message if there is a color for this type of message,
-        # either specified by the options or via the default color map.
-        if opts.has_key?(:color)
-          color   = COLORS[opts[:color]]
-          message = "#{color}#{message}#{COLORS[:clear]}"
-        else
-          message = "#{COLOR_MAP[type]}#{message}#{COLORS[:clear]}" if COLOR_MAP[type]
+        opts = @opts.merge(opts)
+
+        # Special case some colors for certain message types
+        opts[:color] = :red if type == :error
+        opts[:color] = :green if type == :success
+        opts[:color] = :yellow if type == :warn
+
+        # If it is a detail, it is not bold. Every other message type
+        # is bolded.
+        bold  = !!opts[:bold]
+        colorseq = "#{bold ? 1 : 0 }"
+        if opts[:color] && opts[:color] != :default
+          color = COLORS[opts[:color]]
+          colorseq += ";#{color}"
         end
 
-        message
+        # Color the message and make sure to reset the color at the end
+        "\033[#{colorseq}m#{message}\033[0m"
       end
     end
   end

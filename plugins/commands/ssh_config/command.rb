@@ -7,14 +7,20 @@ module VagrantPlugins
     class Command < Vagrant.plugin("2", :command)
       include Vagrant::Util::SafePuts
 
+      def self.synopsis
+        "outputs OpenSSH valid configuration to connect to the machine"
+      end
+
       def execute
         options = {}
 
         opts = OptionParser.new do |o|
-          o.banner = "Usage: vagrant ssh-config [vm-name] [--host name]"
+          o.banner = "Usage: vagrant ssh-config [options] [name]"
           o.separator ""
+          o.separator "Options:"
+          o.separator ""                    
 
-          o.on("--host COMMAND", "Name the host for the config..") do |h|
+          o.on("--host NAME", "Name the host for the config") do |h|
             options[:host] = h
           end
         end
@@ -33,7 +39,8 @@ module VagrantPlugins
             :ssh_user => ssh_info[:username],
             :private_key_path => ssh_info[:private_key_path],
             :forward_agent => ssh_info[:forward_agent],
-            :forward_x11   => ssh_info[:forward_x11]
+            :forward_x11   => ssh_info[:forward_x11],
+            :proxy_command => ssh_info[:proxy_command]
           }
 
           # Render the template and output directly to STDOUT

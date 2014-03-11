@@ -61,3 +61,12 @@ more than 50% would be used on your own host machine. Some details:
 
 * Multiple `customize` directives can be used. They will be executed in the
   order given.
+
+There are some convenience shortcuts for memory and CPU settings:
+
+```ruby
+config.vm.provider "virtualbox" do |v|
+  v.memory = 1024
+  v.cpus = 2
+end
+```

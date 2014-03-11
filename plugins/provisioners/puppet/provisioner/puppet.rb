@@ -17,7 +17,6 @@ module VagrantPlugins
         def configure(root_config)
           # Calculate the paths we're going to use based on the environment
           root_path = @machine.env.root_path
-          @expanded_manifests_path = @config.expanded_manifests_path(root_path)
           @expanded_module_paths   = @config.expanded_module_paths(root_path)
           @manifest_file           = File.join(manifests_guest_path, @config.manifest_file)
 
@@ -28,12 +27,15 @@ module VagrantPlugins
           end
 
           folder_opts = {}
-          folder_opts[:nfs] = true if @config.nfs
-          folder_opts[:owner] = "root" if !folder_opts[:nfs]
+          folder_opts[:type] = @config.synced_folder_type if @config.synced_folder_type
+          folder_opts[:owner] = "root" if !@config.synced_folder_type
 
           # Share the manifests directory with the guest
-          root_config.vm.synced_folder(
-            @expanded_manifests_path, manifests_guest_path, folder_opts)
+          if @config.manifests_path[0].to_sym == :host
+            root_config.vm.synced_folder(
+              File.expand_path(@config.manifests_path[1], root_path),
+              manifests_guest_path, folder_opts)
+          end
 
           # Share the module paths
           @module_paths.each do |from, to|
@@ -43,7 +45,10 @@ module VagrantPlugins
 
         def provision
           # Check that the shared folders are properly shared
-          check = [manifests_guest_path]
+          check = []
+          if @config.manifests_path[0] == :host
+            check << manifests_guest_path
+          end
           @module_paths.each do |host_path, guest_path|
             check << guest_path
           end
@@ -62,7 +67,8 @@ module VagrantPlugins
           # Upload Hiera configuration if we have it
           @hiera_config_path = nil
           if config.hiera_config_path
-            local_hiera_path   = File.expand_path(config.hiera_config_path, @machine.env.root_path)
+            local_hiera_path   = File.expand_path(config.hiera_config_path,
+              @machine.env.root_path)
             @hiera_config_path = File.join(config.temp_dir, "hiera.yaml")
             @machine.communicate.upload(local_hiera_path, @hiera_config_path)
           end
@@ -71,7 +77,13 @@ module VagrantPlugins
         end
 
         def manifests_guest_path
-          File.join(config.temp_dir, "manifests")
+          if config.manifests_path[0] == :host
+            # The path is on the host, so point to where it is shared
+            File.join(config.temp_dir, "manifests")
+          else
+            # The path is on the VM, so just point directly to it
+            config.manifests_path[1]
+          end
         end
 
         def verify_binary(binary)
@@ -86,8 +98,8 @@ module VagrantPlugins
           options = [config.options].flatten
           module_paths = @module_paths.map { |_, to| to }
           if !@module_paths.empty?
-            # Prepend the default module path
-            module_paths.unshift("/etc/puppet/modules")
+            # Append the default module path
+            module_paths << "/etc/puppet/modules"
 
             # Add the command line switch to add the module path
             options << "--modulepath '#{module_paths.join(':')}'"

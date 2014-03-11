@@ -17,15 +17,68 @@ for the machine to boot and be accessible. By default this is 300 seconds.
 
 <hr>
 
-`config.vm.box` - This configures what [box](/v2/boxes/index.html) the
-machine will be brought up against. The value here should match one of
-the installed boxes on the system.
+`config.vm.box` - This configures what [box](/v2/boxes.html) the
+machine will be brought up against. The value here should be the name
+of an installed box or a shorthand name of a box in
+[Vagrant Cloud](http://www.vagrantcloud.com).
+
+<hr>
+
+`config.vm.box_check_update` - If true, Vagrant will check for updates to
+the configured box on every `vagrant up`. If an update is found, Vagrant
+will tell the user. By default this is true. Updates will only be checked
+for boxes that properly support updates (boxes from
+[Vagrant Cloud](http://www.vagrantcloud.com)
+or some other versioned box).
+
+<hr>
+
+`config.vm.box_download_checksum` - The checksum of the box specified by
+`config.vm.box_url`. If not specified, no checksum comparison will be done.
+If specified, Vagrant will compare the checksum of the downloaded box to
+this value and error if they do not match. Checksum checking is only done
+when Vagrant must download the box.
+
+If this is specified, then `config.vm.box_download_checksum_type` must
+also be specified.
+
+<hr>
+
+`config.vm.box_download_checksum_type` - The type of checksum specified
+by `config.vm.box_download_checksum` (if any). Supported values are
+currently "md5", "sha1", and "sha256".
+
+<hr>
+
+`config.vm.box_download_client_cert` - Path to a client certificate to
+use when downloading the box, if it is necessary. By default, no client
+certificate is used to download the box.
+
+<hr>
+
+`config.vm.box_download_insecure` - If true, then SSL certificates
+from the server will not be verified. By default, if the URL is an HTTPS
+URL, then SSL certs will be verified.
 
 <hr>
 
 `config.vm.box_url` - The URL that the configured box can be found at.
-If the box is not installed on the system, it will be retrieved from this
-URL when `vagrant up` is run.
+If `config.vm.box` is a shorthand to a box in [Vagrant Cloud](http://www.vagrantcloud.com)
+then this value doesn't need to be specified. Otherwise, it should
+point to the proper place where the box can be found if it isn't
+installed.
+
+This can also be an array of multiple URLs. The URLs will be tried in
+order. Note that any client certificates, insecure download settings, and
+so on will apply to all URLs in this list.
+
+<hr>
+
+`config.vm.box_version` - The version of the box to use. This defaults to
+">= 0" (the latest version available). This can contain an arbitrary list
+of constraints, separated by commas, such as: `>= 1.0, < 1.5`. When constraints
+are given, Vagrant will use the latest available box satisfying these
+constraints.
 
 <hr>
 

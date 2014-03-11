@@ -1,12 +1,18 @@
 module VagrantPlugins
   module CommandDestroy
     class Command < Vagrant.plugin("2", :command)
+      def self.synopsis
+        "stops and deletes all traces of the vagrant machine"
+      end
+
       def execute
         options = {}
         options[:force] = false
 
         opts = OptionParser.new do |o|
-          o.banner = "Usage: vagrant destroy [vm-name]"
+          o.banner = "Usage: vagrant destroy [options] [name]"
+          o.separator ""
+          o.separator "Options:"
           o.separator ""
 
           o.on("-f", "--force", "Destroy without confirmation.") do |f|

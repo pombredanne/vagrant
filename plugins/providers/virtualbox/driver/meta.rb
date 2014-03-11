@@ -44,7 +44,8 @@ module VagrantPlugins
           driver_map   = {
             "4.0" => Version_4_0,
             "4.1" => Version_4_1,
-            "4.2" => Version_4_2
+            "4.2" => Version_4_2,
+            "4.3" => Version_4_3
           }
 
           if @version.start_with?("4.2.14")
@@ -62,7 +63,8 @@ module VagrantPlugins
 
           if !driver_klass
             supported_versions = driver_map.keys.sort.join(", ")
-            raise Vagrant::Errors::VirtualBoxInvalidVersion, :supported_versions => supported_versions
+            raise Vagrant::Errors::VirtualBoxInvalidVersion,
+              supported_versions: supported_versions
           end
 
           @logger.info("Using VirtualBox driver: #{driver_klass}")
@@ -91,6 +93,8 @@ module VagrantPlugins
           :read_forwarded_ports,
           :read_bridged_interfaces,
           :read_guest_additions_version,
+          :read_guest_ip,
+          :read_guest_property,
           :read_host_only_interfaces,
           :read_mac_address,
           :read_mac_addresses,

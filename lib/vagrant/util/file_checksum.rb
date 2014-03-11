@@ -8,7 +8,7 @@ class DigestClass
 end
 
 class FileChecksum
-  BUFFER_SIZE = 1024
+  BUFFER_SIZE = 16328
 
   # Initializes an object to calculate the checksum of a file. The given
   # ``digest_klass`` should implement the ``DigestClass`` interface. Note
@@ -16,7 +16,7 @@ class FileChecksum
   # Digest::MD5, Digest::SHA1, etc.
   def initialize(path, digest_klass)
     @digest_klass = digest_klass
-    @path   = path
+    @path         = path
   end
 
   # This calculates the checksum of the file and returns it as a
@@ -24,12 +24,18 @@ class FileChecksum
   #
   # @return [String]
   def checksum
-    digest= @digest_klass.new
+    digest = @digest_klass.new
 
-    File.open(@path, "r") do |f|
+    File.open(@path, "rb") do |f|
       while !f.eof
-        buf = f.readpartial(BUFFER_SIZE)
-        digest.update(buf)
+        begin
+          buf = f.readpartial(BUFFER_SIZE)
+          digest.update(buf)
+        rescue EOFError
+          # Although we check for EOF earlier, this seems to happen
+          # sometimes anyways [GH-2716].
+          break
+        end
       end
     end
 

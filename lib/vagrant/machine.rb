@@ -1,3 +1,5 @@
+require "thread"
+
 require "log4r"
 
 module Vagrant
@@ -8,12 +10,12 @@ module Vagrant
     # The box that is backing this machine.
     #
     # @return [Box]
-    attr_reader :box
+    attr_accessor :box
 
     # Configuration for the machine.
     #
     # @return [Object]
-    attr_reader :config
+    attr_accessor :config
 
     # Directory where machine-specific data can be stored.
     #
@@ -34,7 +36,7 @@ module Vagrant
 
     # Name of the machine. This is assigned by the Vagrantfile.
     #
-    # @return [String]
+    # @return [Symbol]
     attr_reader :name
 
     # The provider backing this machine.
@@ -45,7 +47,7 @@ module Vagrant
     # The provider-specific configuration for this machine.
     #
     # @return [Object]
-    attr_reader :provider_config
+    attr_accessor :provider_config
 
     # The name of the provider.
     #
@@ -62,6 +64,11 @@ module Vagrant
     # @return [UI]
     attr_reader :ui
 
+    # The Vagrantfile that this machine is attached to.
+    #
+    # @return [Vagrantfile]
+    attr_reader :vagrantfile
+
     # Initialize a new machine.
     #
     # @param [String] name Name of the virtual machine.
@@ -77,7 +84,7 @@ module Vagrant
     # @param [Box] box The box that is backing this virtual machine.
     # @param [Environment] env The environment that this machine is a
     #   part of.
-    def initialize(name, provider_name, provider_cls, provider_config, provider_options, config, data_dir, box, env, base=false)
+    def initialize(name, provider_name, provider_cls, provider_config, provider_options, config, data_dir, box, env, vagrantfile, base=false)
       @logger = Log4r::Logger.new("vagrant::machine")
       @logger.info("Initializing machine: #{name}")
       @logger.info("  - Provider: #{provider_cls}")
@@ -88,6 +95,7 @@ module Vagrant
       @config          = config
       @data_dir        = data_dir
       @env             = env
+      @vagrantfile     = vagrantfile
       @guest           = Guest.new(
         self,
         Vagrant.plugin("2").manager.guests,
@@ -96,7 +104,8 @@ module Vagrant
       @provider_config = provider_config
       @provider_name   = provider_name
       @provider_options = provider_options
-      @ui              = @env.ui.scope(@name)
+      @ui              = Vagrant::UI::Prefixed.new(@env.ui, @name)
+      @ui_mutex        = Mutex.new
 
       # Read the ID, which is usually in local storage
       @id = nil
@@ -114,6 +123,7 @@ module Vagrant
       # Initializes the provider last so that it has access to all the
       # state we setup on this machine.
       @provider = provider_cls.new(self)
+      @provider._initialize(@provider_name, self)
     end
 
     # This calls an action on the provider. The provider may or may not
@@ -220,7 +230,7 @@ module Vagrant
       end
 
       # Store the ID locally
-      @id = value
+      @id = value.nil? ? nil : value.to_s
 
       # Notify the provider that the ID changed in case it needs to do
       # any accounting from it.
@@ -280,6 +290,7 @@ module Vagrant
       info[:host] = @config.ssh.host if @config.ssh.host
       info[:port] = @config.ssh.port if @config.ssh.port
       info[:username] = @config.ssh.username if @config.ssh.username
+      info[:password] = @config.ssh.password if @config.ssh.password
 
       # We also set some fields that are purely controlled by Varant
       info[:forward_agent] = @config.ssh.forward_agent
@@ -291,7 +302,7 @@ module Vagrant
       # Set the private key path. If a specific private key is given in
       # the Vagrantfile we set that. Otherwise, we use the default (insecure)
       # private key, but only if the provider didn't give us one.
-      if !info[:private_key_path]
+      if !info[:private_key_path] && !info[:password]
         if @config.ssh.private_key_path
           info[:private_key_path] = @config.ssh.private_key_path
         else
@@ -299,8 +310,22 @@ module Vagrant
         end
       end
 
+      # If we have a private key in our data dir, then use that
+      data_private_key = @data_dir.join("private_key")
+      if data_private_key.file?
+        info[:private_key_path] = [data_private_key.to_s]
+      end
+
+      # Setup the keys
+      info[:private_key_path] ||= []
+      if !info[:private_key_path].is_a?(Array)
+        info[:private_key_path] = [info[:private_key_path]]
+      end
+
       # Expand the private key path relative to the root path
-      info[:private_key_path] = File.expand_path(info[:private_key_path], @env.root_path)
+      info[:private_key_path].map! do |path|
+        File.expand_path(path, @env.root_path)
+      end
 
       # Return the final compiled SSH info data
       info
@@ -309,11 +334,25 @@ module Vagrant
     # Returns the state of this machine. The state is queried from the
     # backing provider, so it can be any arbitrary symbol.
     #
-    # @return [Symbol]
+    # @return [MachineState]
     def state
       result = @provider.state
       raise Errors::MachineStateInvalid if !result.is_a?(MachineState)
       result
+    end
+
+    # Temporarily changes the machine UI. This is useful if you want
+    # to execute an {#action} with a different UI.
+    def with_ui(ui)
+      @ui_mutex.synchronize do
+        begin
+          old_ui = @ui
+          @ui    = ui
+          yield
+        ensure
+          @ui = old_ui
+        end
+      end
     end
   end
 end

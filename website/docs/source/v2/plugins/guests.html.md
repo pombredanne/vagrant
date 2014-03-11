@@ -51,7 +51,7 @@ is booted in order to determine what operating system the guest is running.
 If you detect that it is your operating system, return `true` from `detect?`.
 Otherwise, return `false`.
 
-Communication channels to the machine are guranteed to be running at this
+Communication channels to the machine are guaranteed to be running at this
 point, so the most common way to detect the operating system is to do
 some basic testing:
 
@@ -64,7 +64,7 @@ end
 ```
 
 After detecting an OS, that OS is used for various
-[guest capabilities](/v2/plugins/guest_capabilities.html) that may be
+[guest capabilities](/v2/plugins/guest-capabilities.html) that may be
 required.
 
 ## Guest Inheritance
@@ -76,7 +76,7 @@ Inheritance allows guests to share a lot of common behavior while allowing
 distro-specific overrides.
 
 Inheritance is not done via standard Ruby class inheritance because Vagrant
-uses a custom [capability-based](/v2/plugins/guest_capabilities.html) system.
+uses a custom [capability-based](/v2/plugins/guest-capabilities.html) system.
 Vagrant handles inheritance dispatch for you.
 
 To subclass another guest, specify that guest's name as a second parameter

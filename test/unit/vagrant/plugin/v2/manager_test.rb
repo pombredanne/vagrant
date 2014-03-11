@@ -126,15 +126,32 @@ describe Vagrant::Plugin::V2::Manager do
     end
 
     pB = plugin do |p|
-      p.host("bar") { "baz" }
+      p.host("bar", "foo") { "baz" }
     end
 
     instance.register(pA)
     instance.register(pB)
 
     instance.hosts.to_hash.length.should == 2
-    instance.hosts[:foo].should == "bar"
-    instance.hosts[:bar].should == "baz"
+    instance.hosts[:foo].should == ["bar", nil]
+    instance.hosts[:bar].should == ["baz", :foo]
+  end
+
+  it "should enumerate registered host capabilities" do
+    pA = plugin do |p|
+      p.host_capability("foo", "foo") { "bar" }
+    end
+
+    pB = plugin do |p|
+      p.host_capability("bar", "foo") { "baz" }
+    end
+
+    instance.register(pA)
+    instance.register(pB)
+
+    instance.host_capabilities.length.should == 2
+    instance.host_capabilities[:foo][:foo].should == "bar"
+    instance.host_capabilities[:bar][:foo].should == "baz"
   end
 
   it "should enumerate registered provider classes" do
@@ -170,5 +187,22 @@ describe Vagrant::Plugin::V2::Manager do
     instance.provider_configs.to_hash.length.should == 2
     instance.provider_configs[:foo].should == "foo"
     instance.provider_configs[:bar].should == "bar"
+  end
+
+  it "should enumerate all registered synced folder implementations" do
+    pA = plugin do |p|
+      p.synced_folder("foo") { "bar" }
+    end
+
+    pB = plugin do |p|
+      p.synced_folder("bar", 50) { "baz" }
+    end
+
+    instance.register(pA)
+    instance.register(pB)
+
+    instance.synced_folders.to_hash.length.should == 2
+    instance.synced_folders[:foo].should == ["bar", 10]
+    instance.synced_folders[:bar].should == ["baz", 50]
   end
 end

@@ -20,15 +20,16 @@ module VagrantPlugins
           chown_provisioning_folder
           create_client_key_folder
           upload_validation_key
-          upload_encrypted_data_bag_secret if @config.encrypted_data_bag_secret_key_path
+          upload_encrypted_data_bag_secret
           setup_json
           setup_server_config
           run_chef_client
+          delete_encrypted_data_bag_secret
         end
 
         def cleanup
-          delete_from_chef_server('client') if config.delete_client
-          delete_from_chef_server('node') if config.delete_node
+          delete_from_chef_server('client') if @config.delete_client
+          delete_from_chef_server('node') if @config.delete_node
         end
 
         def create_client_key_folder
@@ -43,21 +44,12 @@ module VagrantPlugins
           @machine.communicate.upload(validation_key_path, guest_validation_key_path)
         end
 
-        def upload_encrypted_data_bag_secret
-          @machine.env.ui.info I18n.t("vagrant.provisioners.chef.upload_encrypted_data_bag_secret_key")
-          @machine.communicate.upload(encrypted_data_bag_secret_key_path,
-                                  @config.encrypted_data_bag_secret)
-        end
-
         def setup_server_config
           setup_config("provisioners/chef_client/client", "client.rb", {
-            :node_name => @config.node_name,
             :chef_server_url => @config.chef_server_url,
             :validation_client_name => @config.validation_client_name,
             :validation_key => guest_validation_key_path,
             :client_key => @config.client_key_path,
-            :environment => @config.environment,
-            :encrypted_data_bag_secret => @config.encrypted_data_bag_secret
           })
         end
 
@@ -68,7 +60,9 @@ module VagrantPlugins
 
           command_env = @config.binary_env ? "#{@config.binary_env} " : ""
           command_args = @config.arguments ? " #{@config.arguments}" : ""
-          command = "#{command_env}#{chef_binary_path("chef-client")} -c #{@config.provisioning_path}/client.rb -j #{@config.provisioning_path}/dna.json #{command_args}"
+          command = "#{command_env}#{chef_binary_path("chef-client")} " +
+            "-c #{@config.provisioning_path}/client.rb " +
+            "-j #{@config.provisioning_path}/dna.json #{command_args}"
 
           @config.attempts.times do |attempt|
             if attempt == 0
@@ -96,24 +90,20 @@ module VagrantPlugins
           File.expand_path(@config.validation_key_path, @machine.env.root_path)
         end
 
-        def encrypted_data_bag_secret_key_path
-          File.expand_path(@config.encrypted_data_bag_secret_key_path, @machine.env.root_path)
-        end
-
         def guest_validation_key_path
           File.join(@config.provisioning_path, "validation.pem")
         end
 
         def delete_from_chef_server(deletable)
-          node_name = config.node_name || env[:vm].config.vm.host_name
-          env[:ui].info(I18n.t(
+          node_name = @config.node_name || @machine.config.vm.hostname
+          @machine.env.ui.info(I18n.t(
             "vagrant.provisioners.chef.deleting_from_server",
             deletable: deletable, name: node_name))
 
           command = ["knife", deletable, "delete", "--yes", node_name]
           r = Vagrant::Util::Subprocess.execute(*command)
           if r.exit_code != 0
-            env[:ui].error(I18n.t(
+            @machine.env.ui.error(I18n.t(
               "vagrant.chef_client_cleanup_failed",
               deletable: deletable,
               stdout: r.stdout,

@@ -26,9 +26,34 @@ module VagrantPlugins
         Cap::Halt
       end
 
+      guest_capability("freebsd", "insert_public_key") do
+        require_relative "cap/insert_public_key"
+        Cap::InsertPublicKey
+      end
+
       guest_capability("freebsd", "mount_nfs_folder") do
         require_relative "cap/mount_nfs_folder"
         Cap::MountNFSFolder
+      end
+
+      guest_capability("freebsd", "rsync_install") do
+        require_relative "cap/rsync"
+        Cap::RSync
+      end
+
+      guest_capability("freebsd", "rsync_installed") do
+        require_relative "cap/rsync"
+        Cap::RSync
+      end
+
+      guest_capability("freebsd", "rsync_pre") do
+        require_relative "cap/rsync"
+        Cap::RSync
+      end
+
+      guest_capability("freebsd", "shell_expand_guest_path") do
+        require_relative "cap/shell_expand_guest_path"
+        Cap::ShellExpandGuestPath
       end
     end
   end
